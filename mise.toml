@@ -1,0 +1,22 @@
+[tasks.backend]
+description = "Start the quasar backend in live CLI mode"
+# Free a stale :3000 (e.g. an orphaned prior run) before starting.
+run = "fuser -k 3000/tcp 2>/dev/null || true; sleep 0.4; cargo run -p quasar"
+
+[tasks.backend-fixtures]
+description = "Start the quasar backend with fixture data"
+env = { QUASAR_MODE = "fixtures" }
+run = "fuser -k 3000/tcp 2>/dev/null || true; sleep 0.4; cargo run -p quasar"
+
+[tasks.frontend]
+description = "Start the frontend dev server"
+dir = "apps/frontend"
+run = "npm run dev"
+
+[tasks.dev]
+description = "Start backend and frontend in live mode"
+run = "mise run backend ::: frontend"
+
+[tasks.dev-fixtures]
+description = "Start backend with fixture data and the frontend"
+run = "mise run backend-fixtures ::: frontend"

@@ -1,0 +1,279 @@
+# GitHub and Jira Unified Dashboard
+
+This repository contains a local dashboard that combines GitHub issues from `gh`
+and Jira tickets from `acli` into one unified view. Planning dates and status are
+editable inline for both sources — GitHub via `gh api graphql` (Projects v2) and
+Jira via the REST API (`curl`), the latter requiring a `[jira]` credentials block
+(see [Editing dates and status](#editing-dates-and-status)).
+
+## Workspace Layout
+
+- `crates/quasar`: Rust backend for CLI integration, config loading,
+  normalized APIs, and tests
+- `apps/frontend`: React frontend for dashboard visualizations and filters
+- `docs/plans`: design and implementation planning documents
+
+## Backend Configuration
+
+The backend reads its user-local config from:
+
+```text
+~/.config/quasar/config.toml
+```
+
+If the file is missing, the service falls back to built-in defaults.
+
+Example config:
+
+```toml
+bind_addr = "127.0.0.1:3000"
+cache_ttl_secs = 30
+mode = "cli"
+github_repos = [
+  "openai/quasar",
+  "rust-lang/rust",
+  "tokio-rs/tokio",
+]
+jira_jql = "project = ENG AND statusCategory != Done ORDER BY updated DESC"
+
+# Optional: GitHub Projects v2 board for date/status enrichment + editing.
+[github_project]
+owner = "your-org"
+number = 18
+
+# Optional: Jira REST credentials. Required only to edit Jira dates/status;
+# omit it and Jira fields stay read-only. Token is stored in plaintext, so
+# keep the file owner-only (chmod 600).
+[jira]
+email = "you@example.com"
+token = "<atlassian-api-token>"   # id.atlassian.com -> Security -> API tokens
+# base_url = "https://your-site.atlassian.net"   # optional, set to your site
+```
+
+Config resolution order is:
+
+1. Environment variable overrides
+2. `~/.config/quasar/config.toml`
+3. Built-in defaults
+
+Environment overrides still work for one-off runs and local debugging:
+
+- `QUASAR_BIND` default: `127.0.0.1:3000`
+- `QUASAR_CACHE_TTL_SECS` default: `30`
+- `QUASAR_MODE` values: `cli` or `fixtures`
+- `QUASAR_GITHUB_REPO` example: `openai/quasar`
+  This override forces a single GitHub repo, even if `github_repos` contains
+  multiple entries in the config file.
+- `QUASAR_JIRA_JQL` default: `order by updated desc`
+
+## GitHub Data Fetching
+
+The backend fetches GitHub data by shelling out to the `gh` CLI in two steps:
+
+1. **Issues** — `gh issue list -R <repo>` pulls open issues for each slug in
+   `github_repos`.
+2. **Planning dates** — if a `[github_project]` table is configured, a
+   `gh api graphql` (Projects v2) query enriches each issue with Start and
+   Target dates from a project board.
+
+Two separate config pieces identify what gets fetched:
+
+- **`github_repos`** — a list of `owner/repo` slugs. This is what actually
+  scopes the query; issues are read per-repo, and the owner/name come from
+  splitting each slug.
+- **`[github_project]`** — the board is selected purely by its numeric
+  `number`. There is **no project name field** — a board like
+  "Scientific Software Dev" is identified only by the number in its URL
+  (e.g. `github.com/orgs/your-org/projects/18` → `number = 18`).
+
+Example:
+
+```toml
+github_repos = ["your-org/quasar"]
+
+[github_project]
+owner = "your-org"
+number = 18
+# optional, defaults shown:
+start_date_field = "Start date"
+target_date_field = "Target date"
+```
+
+Notes:
+
+- The query is **repository-scoped**. It walks each configured repo's issues
+  and matches their `projectItems` against `number`. Issues on the board whose
+  repo is not listed in `github_repos` are not fetched. There is no org-level
+  "list everything on project N" lookup.
+- The `owner` field in `[github_project]` is required by the config parser but
+  is not currently read at runtime — the effective owner/repo come from the
+  `github_repos` slugs.
+- The same single `[github_project]` is applied to all configured repos.
+
+## Item Detail Overlay
+
+Clicking a work-item card's title opens an overlay with the full issue/ticket
+body (rendered Markdown), the comment thread, and a metadata sidebar (status,
+assignee, author, labels, priority, dates, repo/project, and a link to the
+original). Detail is fetched lazily only when an item is opened, via
+`GET /api/work-item-detail?id=<work-item-id>`, and is not cached — each open
+fetches fresh from `gh issue view` / `acli jira workitem view`. The `↗` link on
+each card still opens the original issue/ticket in a new tab.
+
+### Editing dates and status
+
+GitHub work-item Start/Target dates and the Projects v2 **Status** (the board
+single-select field, distinct from the issue open/closed state) are editable
+inline from the detail overlay. Opening an item enriches the detail with the
+item's current dates, Status, and the available Status options via one
+`gh api graphql` query, so the date inputs and Status dropdown open pre-filled.
+Edits issue `PATCH /api/work-item-field`
+(`{ id, field: "start" | "target" | "status", value }`), which resolves the
+project/field/(option)/item, adds the issue to the configured board if needed,
+runs an `updateProjectV2ItemFieldValue` (or clear) mutation, and invalidates the
+work-items cache. Requires a `gh` token with `project` write scope and a
+`[github_project]` configured (optional `status_field`, default `"Status"`).
+
+Jira **Target start**/**Target end** dates and workflow **Status** are also
+editable inline when a `[jira]` credentials block is configured. The installed
+`acli` (1.3.22) cannot set custom fields, so Jira writes go through the REST API
+via `curl`: dates are set with `PUT /rest/api/3/issue/<key>`
+(`customfield_10022`/`10023`), and status changes look up the matching workflow
+transition (`GET /rest/api/3/issue/<key>/transitions`) and apply it
+(`POST .../transitions`). Opening a Jira item enriches its detail with the
+reachable transition targets so the Status dropdown is pre-filled; because Jira
+status is workflow-driven it offers no blank/clear option. The same
+`PATCH /api/work-item-field` endpoint handles both sources, keyed off the
+`github:`/`jira:` id prefix.
+
+```toml
+[jira]
+email = "you@example.com"
+token = "<atlassian-api-token>"    # id.atlassian.com → Security → API tokens
+# optional, set to your Atlassian site:
+base_url = "https://your-site.atlassian.net"
+```
+
+The token is stored in plaintext in `config.toml`, so keep the file readable
+only by you (`chmod 600`). Without a `[jira]` block, Jira fields stay read-only
+and edit attempts return `409`.
+
+## Backend Commands
+
+Start the local API server:
+
+```bash
+cargo run -p quasar
+```
+
+Run backend tests:
+
+```bash
+cargo test -p quasar -- --nocapture
+```
+
+Start the backend with fixture data instead of live `gh` and `acli` calls:
+
+```bash
+QUASAR_MODE=fixtures cargo run -p quasar
+```
+
+## Frontend Commands
+
+Install dependencies:
+
+```bash
+cd apps/frontend
+npm install
+```
+
+Run frontend tests:
+
+```bash
+npm test
+```
+
+Build production assets:
+
+```bash
+npm run build
+```
+
+Start the development server:
+
+```bash
+npm run dev
+```
+
+In dev mode, the frontend proxies `/api/*` requests to `http://127.0.0.1:3000`.
+
+## Current Behavior
+
+Implemented now:
+
+- backend config loading from `~/.config/quasar/config.toml`
+- GitHub fan-out across multiple configured repositories
+- fixture-backed and CLI-backed adapter paths for GitHub and Jira
+- short-lived in-memory caching for API responses
+- unified work-item rendering with explicit repo metadata in the payload
+- summary cards, status chart, recent activity panel, and tests
+- repository, source, and status filters in the frontend
+- item detail overlay with lazily-fetched body, comments, and metadata
+- inline editing of GitHub start/target dates and board Status
+
+The repository filter is populated from fetched GitHub items, and the dashboard
+cards/list update against the active repository, source, and status selections.
+
+## Launch Locally
+
+Use two terminals.
+
+Terminal 1, start the backend from the repo root:
+
+```bash
+cd /home/kaihsinwu/quasar
+cargo run -p quasar
+```
+
+Terminal 2, start the frontend dev server:
+
+```bash
+cd /home/kaihsinwu/quasar/apps/frontend
+npm run dev
+```
+
+Then open:
+
+```text
+http://localhost:5173
+```
+
+For predictable sample data, either set `mode = "fixtures"` in your config file
+or launch the backend with:
+
+```bash
+cd /home/kaihsinwu/quasar
+QUASAR_MODE=fixtures cargo run -p quasar
+```
+
+## Launch With Mise
+
+If you use `mise`, you can start services from the repo root:
+
+```bash
+mise run dev
+```
+
+Or start the fixture-backed version:
+
+```bash
+mise run dev-fixtures
+```
+
+Available tasks:
+
+- `mise run backend`
+- `mise run backend-fixtures`
+- `mise run frontend`
+- `mise run dev`
+- `mise run dev-fixtures`

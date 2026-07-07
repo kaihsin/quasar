@@ -1,0 +1,26 @@
+[
+  {
+    "number": 123,
+    "title": "Investigate sync gap",
+    "url": "https://github.com/openai/quasar/issues/123",
+    "state": "OPEN",
+    "assignees": [
+      {
+        "login": "kai"
+      }
+    ],
+    "labels": [
+      {
+        "name": "bug"
+      },
+      {
+        "name": "infra"
+      }
+    ],
+    "createdAt": "2026-07-06T10:00:00Z",
+    "updatedAt": "2026-07-06T11:00:00Z",
+    "author": {
+      "login": "octocat"
+    }
+  }
+]

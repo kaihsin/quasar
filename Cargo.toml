@@ -1,0 +1,4 @@
+[workspace]
+members = ["crates/quasar"]
+resolver = "2"
+

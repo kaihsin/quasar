@@ -1,0 +1,21 @@
+{
+  "key": "ABC-42",
+  "fields": {
+    "summary": "Design overlay",
+    "description": "We need a modal that shows full ticket detail.",
+    "status": { "name": "In Progress" },
+    "assignee": { "displayName": "Kai Hsin Wu" },
+    "priority": { "name": "High" },
+    "reporter": { "displayName": "Kai Hsin Wu" },
+    "labels": ["frontend"],
+    "created": "2026-07-01T09:00:00Z",
+    "updated": "2026-07-06T09:00:00Z",
+    "customfield_10022": "2026-07-01",
+    "customfield_10023": "2026-07-20",
+    "comment": {
+      "comments": [
+        { "author": { "displayName": "Kai Hsin Wu" }, "created": "2026-07-02T09:00:00Z", "body": "Started on this." }
+      ]
+    }
+  }
+}

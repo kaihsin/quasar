@@ -1,0 +1,16 @@
+{
+  "number": 123,
+  "title": "Investigate sync gap",
+  "url": "https://github.com/openai/quasar/issues/123",
+  "state": "OPEN",
+  "body": "## Summary\nThe sync job drops events under load.\n\n- [ ] Reproduce\n- [ ] Fix",
+  "assignees": [{ "login": "kai" }],
+  "labels": [{ "name": "bug" }],
+  "createdAt": "2026-07-06T10:00:00Z",
+  "updatedAt": "2026-07-06T11:00:00Z",
+  "author": { "login": "octocat" },
+  "comments": [
+    { "author": { "login": "kai" }, "createdAt": "2026-07-06T12:00:00Z", "body": "I can repro on staging." },
+    { "author": { "login": "octocat" }, "createdAt": "2026-07-06T13:00:00Z", "body": "Nice, thanks." }
+  ]
+}

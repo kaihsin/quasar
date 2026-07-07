@@ -1,0 +1,24 @@
+[
+  {
+    "key": "ABC-42",
+    "fields": {
+      "summary": "Bring Jira tickets into unified dashboard",
+      "status": {
+        "name": "In Progress"
+      },
+      "assignee": {
+        "displayName": "Kai Hsin Wu"
+      },
+      "labels": [
+        "dashboard",
+        "integration"
+      ],
+      "priority": {
+        "name": "High"
+      },
+      "reporter": {
+        "displayName": "Product Ops"
+      }
+    }
+  }
+]
