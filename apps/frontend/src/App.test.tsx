@@ -567,11 +567,14 @@ describe("App shell", () => {
 
     render(<App />);
 
+    // Source = All: the combined list carries repos and the Jira project (hinted).
     expect(await screen.findByRole("option", { name: "openai/quasar" })).not.toBeNull();
     expect(screen.getByRole("option", { name: "openai/platform" })).not.toBeNull();
-    expect(screen.queryByRole("option", { name: "Unified Tracking" })).toBeNull();
+    expect(screen.getByRole("option", { name: "Unified Tracking (Jira)" })).not.toBeNull();
 
-    fireEvent.change(screen.getByLabelText("Repository"), { target: { value: "openai/quasar" } });
+    fireEvent.change(screen.getByLabelText("Repository / Project"), {
+      target: { value: "openai/quasar" },
+    });
     fireEvent.change(screen.getByLabelText("Source"), { target: { value: "github" } });
     fireEvent.change(screen.getByLabelText("Status"), { target: { value: "open" } });
 
@@ -612,7 +615,7 @@ describe("App shell", () => {
               external_id: "ABC-42",
               title: "Jira issue",
               url: "https://jira.example.com/ABC-42",
-              status: "open",
+              status: "In Review",
               assignee: "Kai",
               labels: ["dashboard"],
               priority: "High",
@@ -664,7 +667,9 @@ describe("App shell", () => {
 
     expect(await screen.findByRole("button", { name: "Quasar issue" })).not.toBeNull();
 
-    fireEvent.change(screen.getByLabelText("Repository"), { target: { value: "openai/quasar" } });
+    // Both selections are individually valid (the Jira item makes "jira" a real
+    // source; the GitHub item makes "open" a real status) but jointly match
+    // nothing — the Jira item is "In Review", not "open".
     fireEvent.change(screen.getByLabelText("Source"), { target: { value: "jira" } });
     fireEvent.change(screen.getByLabelText("Status"), { target: { value: "open" } });
 
@@ -677,11 +682,103 @@ describe("App shell", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Refresh data" }));
 
+    // The refreshed dataset has neither the "jira" source nor the "open" status,
+    // so both stale selections reset to "all" and the new item is shown.
     expect(await screen.findByRole("button", { name: "Platform issue" })).not.toBeNull();
     expect(screen.queryByRole("heading", { name: "No work items match the current filters" })).toBeNull();
-    expect((screen.getByLabelText("Repository") as HTMLSelectElement).value).toBe("all");
+    expect((screen.getByLabelText("Repository / Project") as HTMLSelectElement).value).toBe("all");
     expect((screen.getByLabelText("Source") as HTMLSelectElement).value).toBe("all");
     expect((screen.getByLabelText("Status") as HTMLSelectElement).value).toBe("all");
     expect(await screen.findByText("Last fetch: 2026-07-06T13:00:00Z • 1 item(s)")).not.toBeNull();
+  });
+
+  // Two items: a GitHub repo container and a Jira project container, used by the
+  // source-aware container filter tests below.
+  function mixedSourceResponse(): WorkItemsResponse {
+    return {
+      data: [
+        {
+          source: "github",
+          id: "github:openai/quasar#101",
+          external_id: "101",
+          title: "GH issue",
+          url: "https://example.com/101",
+          status: "open",
+          assignee: null,
+          labels: [],
+          priority: null,
+          created_at: "2026-07-05T10:00:00Z",
+          updated_at: "2026-07-06T09:00:00Z",
+          start_date: "",
+          target_date: "",
+          author: "octocat",
+          container: "openai/quasar",
+          repo: "openai/quasar",
+          source_metadata: null,
+        },
+        {
+          source: "jira",
+          id: "jira:SSW-1",
+          external_id: "SSW-1",
+          title: "Jira ticket",
+          url: "https://quera.atlassian.net/browse/SSW-1",
+          status: "Selected for Development",
+          assignee: null,
+          labels: [],
+          priority: null,
+          created_at: "",
+          updated_at: "",
+          start_date: "",
+          target_date: "",
+          author: null,
+          container: "SSW",
+          repo: null,
+          source_metadata: null,
+        },
+      ],
+      warnings: [],
+      fetched_at: "2026-07-06T12:00:00Z",
+      cache_status: "miss",
+    };
+  }
+
+  it("offers a combined repo+project list when Source is All and filters by container", async () => {
+    global.fetch = (jest.fn().mockResolvedValue(
+      streamResponse(mixedSourceResponse()),
+    ) as unknown) as typeof fetch;
+
+    render(<App />);
+    await screen.findByRole("button", { name: "GH issue" });
+
+    const containerFilter = screen.getByLabelText("Repository / Project") as HTMLSelectElement;
+    expect(within(containerFilter).getByRole("option", { name: "openai/quasar" })).not.toBeNull();
+    // Jira containers carry a source hint in the combined (All) list.
+    expect(within(containerFilter).getByRole("option", { name: "SSW (Jira)" })).not.toBeNull();
+
+    // Selecting the Jira project hides the GitHub item.
+    fireEvent.change(containerFilter, { target: { value: "SSW" } });
+    expect(screen.queryByRole("button", { name: "GH issue" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Jira ticket" })).not.toBeNull();
+  });
+
+  it("relabels and scopes the container filter to the selected source", async () => {
+    global.fetch = (jest.fn().mockResolvedValue(
+      streamResponse(mixedSourceResponse()),
+    ) as unknown) as typeof fetch;
+
+    render(<App />);
+    await screen.findByRole("button", { name: "GH issue" });
+
+    // GitHub -> "Repository", only repos, no Jira project.
+    fireEvent.change(screen.getByLabelText("Source"), { target: { value: "github" } });
+    const repoFilter = screen.getByLabelText("Repository") as HTMLSelectElement;
+    expect(within(repoFilter).getByRole("option", { name: "openai/quasar" })).not.toBeNull();
+    expect(within(repoFilter).queryByRole("option", { name: /SSW/ })).toBeNull();
+
+    // Jira -> "Project", only project keys (no source hint in single-source mode).
+    fireEvent.change(screen.getByLabelText("Source"), { target: { value: "jira" } });
+    const projectFilter = screen.getByLabelText("Project") as HTMLSelectElement;
+    expect(within(projectFilter).getByRole("option", { name: "SSW" })).not.toBeNull();
+    expect(within(projectFilter).queryByRole("option", { name: "openai/quasar" })).toBeNull();
   });
 });

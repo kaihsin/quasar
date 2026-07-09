@@ -13,6 +13,94 @@ Jira via the REST API (`curl`), the latter requiring a `[jira]` credentials bloc
 - `apps/frontend`: React frontend for dashboard visualizations and filters
 - `docs/plans`: design and implementation planning documents
 
+## Getting Started
+
+A first-time, end-to-end setup. Commands use Homebrew (macOS); on Linux use your
+package manager or the upstream installers linked below.
+
+### 1. Install prerequisites
+
+| Tool | Why it's needed | Install (macOS / Homebrew) |
+|------|-----------------|----------------------------|
+| **Rust toolchain** (`cargo`, `rustc`) | Builds and runs the backend | `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \| sh` (via [rustup](https://rustup.rs)) |
+| **Node.js + npm** | Builds and serves the frontend | `brew install node` |
+| **`gh`** (GitHub CLI) | Fetches GitHub issues and edits Projects v2 fields | `brew install gh` |
+| **`acli`** (Atlassian CLI) | Fetches Jira work items | `brew install atlassian/acli/acli` |
+| **`mise`** (optional) | Task runner for `mise run dev` | `brew install mise` |
+
+Verify:
+
+```bash
+cargo --version && node --version && gh --version && acli --version
+```
+
+### 2. Authenticate the CLIs
+
+**GitHub** — log in, then ensure the token carries the Projects v2 scope. This is
+required for date/Status enrichment and inline editing; without it those queries
+fail with `INSUFFICIENT_SCOPES` and dates silently render blank:
+
+```bash
+gh auth login                 # if not already logged in
+gh auth refresh -s project    # add the Projects v2 (read+write) scope
+gh auth status                # confirm scopes include 'project'
+```
+
+**Jira** — `acli` handles its own auth (OAuth or API token) for *reading*:
+
+```bash
+acli jira auth login          # OAuth or API token
+acli jira auth status         # confirm the site + account
+```
+
+> Editing Jira dates/status is separate: it uses the Jira REST API with the
+> `[jira]` email/token block in your config (see
+> [Editing dates and status](#editing-dates-and-status)). Reading works with
+> `acli` auth alone.
+
+### 3. Create your config file
+
+The backend reads `~/.config/quasar/config.toml`. Create it and lock it down
+(it may hold a Jira API token):
+
+```bash
+mkdir -p ~/.config/quasar
+$EDITOR ~/.config/quasar/config.toml
+chmod 600 ~/.config/quasar/config.toml
+```
+
+A minimal starting point:
+
+```toml
+github_repos = ["your-org/your-repo"]
+
+[jira_board]
+projects = ["ENG"]              # your Jira project key(s)
+```
+
+See [Backend Configuration](#backend-configuration) for every option, including
+the optional `[github_project]` (date/status enrichment + editing) and `[jira]`
+(Jira write credentials) blocks.
+
+### 4. Install frontend dependencies
+
+```bash
+cd apps/frontend
+npm install
+```
+
+### 5. Run it
+
+From the repo root, with `mise`:
+
+```bash
+mise run dev            # backend (:3000) + frontend (:5173)
+```
+
+…or without `mise`, in two terminals (see [Launch Locally](#launch-locally)).
+Then open <http://localhost:5173>. To try it with no live credentials, use
+fixture mode: `mise run dev-fixtures`.
+
 ## Backend Configuration
 
 The backend reads its user-local config from:
@@ -34,7 +122,15 @@ github_repos = [
   "rust-lang/rust",
   "tokio-rs/tokio",
 ]
-jira_jql = "project = ENG AND statusCategory != Done ORDER BY updated DESC"
+# Which Jira project(s) to pull work items from. Keys compose a
+# `project in (...)` clause; ordering defaults to `ORDER BY updated DESC`.
+[jira_board]
+projects = ["ENG"]
+
+# Optional: an extra raw JQL filter AND'd with the [jira_board] selection above.
+# Its own `ORDER BY`, if present, becomes the query's ordering. Omit [jira_board]
+# and set only this to run a fully hand-written query verbatim (escape hatch).
+# jira_jql = "statusCategory != Done"
 
 # Optional: GitHub Projects v2 board for date/status enrichment + editing.
 [github_project]
@@ -64,7 +160,9 @@ Environment overrides still work for one-off runs and local debugging:
 - `QUASAR_GITHUB_REPO` example: `openai/quasar`
   This override forces a single GitHub repo, even if `github_repos` contains
   multiple entries in the config file.
-- `QUASAR_JIRA_JQL` default: `order by updated desc`
+- `QUASAR_JIRA_JQL` default: `ORDER BY updated DESC`. Sets the optional raw JQL
+  filter (the one AND'd with `[jira_board]`), overriding any `jira_jql` in the
+  file. Project selection via `[jira_board]` has no environment override.
 
 ## GitHub Data Fetching
 
@@ -109,6 +207,53 @@ Notes:
   is not currently read at runtime — the effective owner/repo come from the
   `github_repos` slugs.
 - The same single `[github_project]` is applied to all configured repos.
+
+## Jira Data Fetching
+
+Jira work items come from `acli jira workitem search --jql <query>`. Fetching is
+**per project** (mirroring the per-repo GitHub fan-out): the backend runs one
+`acli` query per configured project and streams each project's results as they
+resolve, so cards appear progressively and one project failing surfaces a
+warning without sinking the others. The query set is composed from two config
+pieces:
+
+- **`[jira_board]`** — `projects = ["SSW", "ENG"]` selects which Jira project(s)
+  to pull from. Each key becomes its **own** `project = KEY` query (a **union**
+  across projects, fetched independently). This is the structured analog of
+  `github_repos`.
+- **`jira_jql`** (optional) — a raw JQL filter **AND'd** into *each* project's
+  query, so it narrows the results (e.g. exclude Done). A single trailing
+  `ORDER BY` is applied: the raw clause's own `ORDER BY` if it has one, otherwise
+  the default `ORDER BY updated DESC`.
+
+Composition examples (each line is a separate `acli` query):
+
+```toml
+# one project -> one query
+[jira_board]
+projects = ["SSW"]
+# -> project = SSW ORDER BY updated DESC
+
+# multiple projects -> one query each (streamed independently)
+[jira_board]
+projects = ["SSW", "ENG"]
+# -> project = SSW ORDER BY updated DESC
+# -> project = ENG ORDER BY updated DESC
+
+# each project's query AND'd with an extra filter
+jira_jql = "statusCategory != Done"
+[jira_board]
+projects = ["SSW", "ENG"]
+# -> (project = SSW) AND (statusCategory != Done) ORDER BY updated DESC
+# -> (project = ENG) AND (statusCategory != Done) ORDER BY updated DESC
+
+# escape hatch: no [jira_board], raw JQL is the sole query, verbatim
+jira_jql = "project = SSW AND statusCategory != Done ORDER BY updated DESC"
+```
+
+To combine boards with a filter, `[jira_board]` selects the project(s) (union)
+and `jira_jql` narrows them (AND). For anything the two can't express together,
+omit `[jira_board]` and write the whole query in `jira_jql`.
 
 ## Item Detail Overlay
 
@@ -217,12 +362,16 @@ Implemented now:
 - short-lived in-memory caching for API responses
 - unified work-item rendering with explicit repo metadata in the payload
 - summary cards, status chart, recent activity panel, and tests
-- repository, source, and status filters in the frontend
+- source-aware container, source, status, and assignee filters in the frontend
 - item detail overlay with lazily-fetched body, comments, and metadata
 - inline editing of GitHub start/target dates and board Status
 
-The repository filter is populated from fetched GitHub items, and the dashboard
-cards/list update against the active repository, source, and status selections.
+The second filter is **source-aware**: with Source = GitHub it lists
+repositories, with Source = Jira it lists projects, and with Source = All it
+shows a combined list (Jira entries hinted). Its options are drawn from each
+item's `container` (GitHub `owner/repo` or Jira project key), and the dashboard
+cards/list update against the active container, source, status, and assignee
+selections.
 
 ## Launch Locally
 
@@ -231,14 +380,13 @@ Use two terminals.
 Terminal 1, start the backend from the repo root:
 
 ```bash
-cd /home/kaihsinwu/quasar
 cargo run -p quasar
 ```
 
 Terminal 2, start the frontend dev server:
 
 ```bash
-cd /home/kaihsinwu/quasar/apps/frontend
+cd apps/frontend
 npm run dev
 ```
 
@@ -252,7 +400,6 @@ For predictable sample data, either set `mode = "fixtures"` in your config file
 or launch the backend with:
 
 ```bash
-cd /home/kaihsinwu/quasar
 QUASAR_MODE=fixtures cargo run -p quasar
 ```
 

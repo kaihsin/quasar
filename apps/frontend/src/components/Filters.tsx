@@ -1,28 +1,35 @@
 type FilterValue = "all" | string;
 
+// A container is a GitHub repository or a Jira project. `value` is matched
+// against `WorkItem.container`; `label` is what the user sees (it may carry a
+// source hint when repos and projects are shown together).
+export type ContainerOption = { value: string; label: string };
+
 export default function Filters({
-  availableRepos,
+  availableContainers,
   availableSources,
   availableStatuses,
   availableAssignees,
-  selectedRepo,
+  containerLabel,
+  selectedContainer,
   selectedSource,
   selectedStatus,
   selectedAssignee,
-  onRepoChange,
+  onContainerChange,
   onSourceChange,
   onStatusChange,
   onAssigneeChange,
 }: {
-  availableRepos: string[];
+  availableContainers: ContainerOption[];
   availableSources: string[];
   availableStatuses: string[];
   availableAssignees: string[];
-  selectedRepo: FilterValue;
+  containerLabel: string;
+  selectedContainer: FilterValue;
   selectedSource: FilterValue;
   selectedStatus: FilterValue;
   selectedAssignee: FilterValue;
-  onRepoChange: (value: FilterValue) => void;
+  onContainerChange: (value: FilterValue) => void;
   onSourceChange: (value: FilterValue) => void;
   onStatusChange: (value: FilterValue) => void;
   onAssigneeChange: (value: FilterValue) => void;
@@ -30,16 +37,16 @@ export default function Filters({
   return (
     <section aria-label="Filters" className="filters-panel">
       <div className="filter-field">
-        <label htmlFor="repo-filter">Repository</label>
+        <label htmlFor="container-filter">{containerLabel}</label>
         <select
-          id="repo-filter"
-          onChange={(event) => onRepoChange(event.target.value)}
-          value={selectedRepo}
+          id="container-filter"
+          onChange={(event) => onContainerChange(event.target.value)}
+          value={selectedContainer}
         >
           <option value="all">All</option>
-          {availableRepos.map((repo) => (
-            <option key={repo} value={repo}>
-              {repo}
+          {availableContainers.map((container) => (
+            <option key={container.value} value={container.value}>
+              {container.label}
             </option>
           ))}
         </select>

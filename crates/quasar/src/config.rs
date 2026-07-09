@@ -15,7 +15,9 @@ pub struct RuntimeConfig {
     pub cache_ttl_secs: u64,
     pub mode: ServerMode,
     pub github_repos: Vec<String>,
-    pub jira_jql: String,
+    /// One composed JQL query per Jira project (or a single query in the
+    /// no-`[jira_board]` escape-hatch case), fetched and streamed independently.
+    pub jira_queries: Vec<String>,
     pub github_project: Option<GitHubProject>,
     pub jira: Option<JiraConfig>,
 }
@@ -34,6 +36,16 @@ pub struct JiraConfig {
 
 fn default_jira_base_url() -> String {
     "https://quera.atlassian.net".to_string()
+}
+
+/// Structured selection of the Jira project(s) to pull work items from,
+/// configured in `config.toml` as a `[jira_board]` table. The listed project
+/// keys compose a `project in (...)` clause; see `compose_jira_jql`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct JiraBoard {
+    #[serde(default)]
+    pub projects: Vec<String>,
 }
 
 /// GitHub Projects v2 board used to enrich issues with planning dates.
@@ -80,6 +92,7 @@ pub enum ConfigError {
     InvalidCacheTtlEnv(String),
     InvalidModeEnv(String),
     InvalidGitHubRepo(String),
+    InvalidJiraProject(String),
 }
 
 impl std::fmt::Display for ConfigError {
@@ -98,6 +111,12 @@ impl std::fmt::Display for ConfigError {
                 write!(
                     f,
                     "invalid GitHub repo slug: {repo} (expected owner/repo with no whitespace)"
+                )
+            }
+            Self::InvalidJiraProject(key) => {
+                write!(
+                    f,
+                    "invalid Jira project key: {key} (must be non-empty with no whitespace)"
                 )
             }
         }
@@ -126,6 +145,7 @@ struct FileConfig {
     mode: Option<ServerMode>,
     github_repos: Option<Vec<String>>,
     jira_jql: Option<String>,
+    jira_board: Option<JiraBoard>,
     github_project: Option<GitHubProject>,
     jira: Option<JiraConfig>,
 }
@@ -162,18 +182,20 @@ pub fn load_runtime_config(
         None => file_config.github_repos.unwrap_or_default(),
     };
     validate_github_repos(&github_repos)?;
-    let jira_jql = env
-        .jira_jql
-        .map(str::to_string)
-        .or(file_config.jira_jql)
-        .unwrap_or_else(|| "order by updated desc".to_string());
+    let jira_projects = file_config
+        .jira_board
+        .map(|board| board.projects)
+        .unwrap_or_default();
+    validate_jira_projects(&jira_projects)?;
+    let raw_jira_jql = env.jira_jql.map(str::to_string).or(file_config.jira_jql);
+    let jira_queries = compose_jira_queries(&jira_projects, raw_jira_jql.as_deref());
 
     Ok(RuntimeConfig {
         bind_addr,
         cache_ttl_secs,
         mode,
         github_repos,
-        jira_jql,
+        jira_queries,
         github_project: file_config.github_project,
         jira: file_config.jira,
     })
@@ -199,6 +221,59 @@ fn parse_env_mode(value: &str) -> Result<ServerMode, ConfigError> {
         "fixtures" => Ok(ServerMode::Fixtures),
         _ => Err(ConfigError::InvalidModeEnv(value.to_string())),
     }
+}
+
+/// Compose the final Jira JQL from the structured board projects and an optional
+/// raw JQL escape hatch, producing **one query per project** so the API can
+/// fetch and stream each project independently (mirroring the per-repo GitHub
+/// fan-out). Each project's `project = KEY` clause is AND'd with the raw JQL
+/// filter (when set), and a single trailing `ORDER BY` is appended — the raw
+/// JQL's own ordering when it has one, else a default. With no projects the raw
+/// JQL (or a bare default) is the sole query, verbatim, preserving the plain-JQL
+/// configuration path.
+fn compose_jira_queries(projects: &[String], raw_jql: Option<&str>) -> Vec<String> {
+    const DEFAULT_ORDER: &str = "ORDER BY updated DESC";
+    let raw = raw_jql.map(str::trim).filter(|jql| !jql.is_empty());
+
+    if projects.is_empty() {
+        return vec![raw.unwrap_or(DEFAULT_ORDER).to_string()];
+    }
+
+    let (raw_where, raw_order) = match raw {
+        Some(raw) => split_order_by(raw),
+        None => ("", None),
+    };
+    let order = raw_order.unwrap_or(DEFAULT_ORDER);
+
+    projects
+        .iter()
+        .map(|key| {
+            if raw_where.is_empty() {
+                format!("project = {key} {order}")
+            } else {
+                format!("(project = {key}) AND ({raw_where}) {order}")
+            }
+        })
+        .collect()
+}
+
+/// Split a JQL string into its where-clause and a trailing `ORDER BY ...` clause
+/// (matched case-insensitively on the last occurrence), if present. Both parts
+/// are trimmed. `ORDER BY` is ASCII, so lowercasing preserves byte offsets.
+fn split_order_by(jql: &str) -> (&str, Option<&str>) {
+    match jql.to_ascii_lowercase().rfind("order by") {
+        Some(idx) => (jql[..idx].trim(), Some(jql[idx..].trim())),
+        None => (jql.trim(), None),
+    }
+}
+
+fn validate_jira_projects(projects: &[String]) -> Result<(), ConfigError> {
+    for key in projects {
+        if key.is_empty() || key.chars().any(char::is_whitespace) {
+            return Err(ConfigError::InvalidJiraProject(key.clone()));
+        }
+    }
+    Ok(())
 }
 
 fn validate_github_repos(repos: &[String]) -> Result<(), ConfigError> {
@@ -298,7 +373,7 @@ jira_jql = "project = TEAM order by updated desc"
                 cache_ttl_secs: 90,
                 mode: ServerMode::Fixtures,
                 github_repos: vec!["openai/quasar".to_string(), "rust-lang/rust".to_string()],
-                jira_jql: "project = TEAM order by updated desc".to_string(),
+                jira_queries: vec!["project = TEAM order by updated desc".to_string()],
                 github_project: None,
                 jira: None,
             }
@@ -349,6 +424,122 @@ base_url = "https://example.atlassian.net"
             config.jira.expect("jira present").base_url,
             "https://example.atlassian.net"
         );
+    }
+
+    #[test]
+    fn compose_jira_queries_board_only_adds_default_order() {
+        let queries = super::compose_jira_queries(&["SSW".to_string()], None);
+        assert_eq!(queries, vec!["project = SSW ORDER BY updated DESC"]);
+    }
+
+    #[test]
+    fn compose_jira_queries_one_query_per_project() {
+        let queries = super::compose_jira_queries(&["SSW".to_string(), "ENG".to_string()], None);
+        assert_eq!(
+            queries,
+            vec![
+                "project = SSW ORDER BY updated DESC",
+                "project = ENG ORDER BY updated DESC",
+            ]
+        );
+    }
+
+    #[test]
+    fn compose_jira_queries_ands_each_project_with_extra_jql() {
+        let queries = super::compose_jira_queries(
+            &["SSW".to_string(), "ENG".to_string()],
+            Some("statusCategory != Done"),
+        );
+        assert_eq!(
+            queries,
+            vec![
+                "(project = SSW) AND (statusCategory != Done) ORDER BY updated DESC",
+                "(project = ENG) AND (statusCategory != Done) ORDER BY updated DESC",
+            ]
+        );
+    }
+
+    #[test]
+    fn compose_jira_queries_honors_extra_jql_order_by() {
+        let queries = super::compose_jira_queries(
+            &["SSW".to_string()],
+            Some("statusCategory != Done ORDER BY created DESC"),
+        );
+        assert_eq!(
+            queries,
+            vec!["(project = SSW) AND (statusCategory != Done) ORDER BY created DESC"]
+        );
+    }
+
+    #[test]
+    fn compose_jira_queries_raw_only_passes_through_verbatim() {
+        let queries = super::compose_jira_queries(&[], Some("project = SSW order by created desc"));
+        assert_eq!(queries, vec!["project = SSW order by created desc"]);
+    }
+
+    #[test]
+    fn compose_jira_queries_neither_defaults_to_order_by() {
+        let queries = super::compose_jira_queries(&[], None);
+        assert_eq!(queries, vec!["ORDER BY updated DESC"]);
+    }
+
+    #[test]
+    fn loads_jira_board_and_composes_per_project_queries() {
+        let home_dir = TestDir::new();
+        let config_path = write_config(
+            home_dir.path(),
+            r#"
+[jira_board]
+projects = ["SSW", "ENG"]
+"#,
+        );
+
+        let config =
+            load_runtime_config(&config_path, EnvOverrides::default()).expect("config should load");
+        assert_eq!(
+            config.jira_queries,
+            vec![
+                "project = SSW ORDER BY updated DESC",
+                "project = ENG ORDER BY updated DESC",
+            ]
+        );
+    }
+
+    #[test]
+    fn jira_board_ands_each_query_with_raw_jql() {
+        let home_dir = TestDir::new();
+        let config_path = write_config(
+            home_dir.path(),
+            r#"
+jira_jql = "statusCategory != Done"
+
+[jira_board]
+projects = ["SSW"]
+"#,
+        );
+
+        let config =
+            load_runtime_config(&config_path, EnvOverrides::default()).expect("config should load");
+        assert_eq!(
+            config.jira_queries,
+            vec!["(project = SSW) AND (statusCategory != Done) ORDER BY updated DESC"]
+        );
+    }
+
+    #[test]
+    fn jira_board_rejects_project_key_with_whitespace() {
+        let home_dir = TestDir::new();
+        let config_path = write_config(
+            home_dir.path(),
+            r#"
+[jira_board]
+projects = ["S S W"]
+"#,
+        );
+
+        let error = load_runtime_config(&config_path, EnvOverrides::default())
+            .expect_err("whitespace project key should be rejected");
+        assert!(matches!(error, ConfigError::InvalidJiraProject(_)));
     }
 
     #[test]
@@ -449,7 +640,7 @@ github_repos = ["openai/quasar", "rust-lang/rust"]
                 cache_ttl_secs: 30,
                 mode: ServerMode::Cli,
                 github_repos: Vec::new(),
-                jira_jql: "order by updated desc".to_string(),
+                jira_queries: vec!["ORDER BY updated DESC".to_string()],
                 github_project: None,
                 jira: None,
             }

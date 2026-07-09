@@ -45,7 +45,7 @@ pub struct AppState {
     pub cache: Arc<ResponseCache>,
     pub runner: Arc<dyn CommandRunner>,
     pub github_repos: Vec<String>,
-    pub jira_jql: String,
+    pub jira_queries: Vec<String>,
     pub github_project: Option<GitHubProject>,
     pub jira_config: Option<JiraConfig>,
 }
@@ -56,7 +56,7 @@ impl AppState {
         jira_source: JiraSource,
         cache_ttl_secs: u64,
         github_repos: Vec<String>,
-        jira_jql: String,
+        jira_queries: Vec<String>,
         github_project: Option<GitHubProject>,
         jira_config: Option<JiraConfig>,
     ) -> Self {
@@ -68,7 +68,7 @@ impl AppState {
             ))),
             runner: Arc::new(SystemCommandRunner),
             github_repos,
-            jira_jql,
+            jira_queries,
             github_project,
             jira_config,
         }
@@ -587,21 +587,36 @@ where
         }
     }
 
-    match match &state.jira_source {
-        JiraSource::Fixture(path) => adapters::jira::load_fixture_work_items(path),
+    match &state.jira_source {
+        JiraSource::Fixture(path) => match adapters::jira::load_fixture_work_items(path) {
+            Ok(items) => emit_items(&mut emit, items, &mut data),
+            Err(error) => emit_warning(
+                &mut emit,
+                SourceWarning {
+                    source: WorkSource::Jira,
+                    message: error.to_string(),
+                },
+                &mut warnings,
+            ),
+        },
+        // One `acli` query per configured Jira project, emitted as its own chunk
+        // so each project streams independently (mirroring the GitHub repo loop).
+        // One project failing surfaces a warning without sinking the others.
         JiraSource::Cli => {
-            adapters::jira::load_work_items_with_runner(state.runner.as_ref(), &state.jira_jql)
+            for jql in &state.jira_queries {
+                match adapters::jira::load_work_items_with_runner(state.runner.as_ref(), jql) {
+                    Ok(items) => emit_items(&mut emit, items, &mut data),
+                    Err(error) => emit_warning(
+                        &mut emit,
+                        SourceWarning {
+                            source: WorkSource::Jira,
+                            message: error.to_string(),
+                        },
+                        &mut warnings,
+                    ),
+                }
+            }
         }
-    } {
-        Ok(items) => emit_items(&mut emit, items, &mut data),
-        Err(error) => emit_warning(
-            &mut emit,
-            SourceWarning {
-                source: WorkSource::Jira,
-                message: error.to_string(),
-            },
-            &mut warnings,
-        ),
     }
 
     data.sort_by(|left, right| left.id.cmp(&right.id));
@@ -651,8 +666,8 @@ mod tests {
     use tower::ServiceExt;
 
     use super::{
-        fetch_work_item_field, fetch_work_items, router, AppState, GitHubSource, JiraSource,
-        UpdateFieldRequest,
+        fetch_work_item_field, fetch_work_items, resolve_work_items, router, AppState,
+        GitHubSource, JiraSource, StreamChunk, UpdateFieldRequest,
     };
     use crate::{
         cache::{CacheOutcome, ResponseCache},
@@ -713,7 +728,7 @@ mod tests {
             cache: Arc::new(ResponseCache::new(Duration::from_secs(30))),
             runner: Arc::new(crate::clients::command_runner::SystemCommandRunner),
             github_repos: Vec::new(),
-            jira_jql: "order by updated desc".to_string(),
+            jira_queries: vec!["order by updated desc".to_string()],
             github_project: None,
             jira_config: None,
         }
@@ -949,7 +964,7 @@ mod tests {
                 ),
             ]))),
             github_repos: vec!["openai/quasar".to_string(), "rust-lang/rust".to_string()],
-            jira_jql: "order by updated desc".to_string(),
+            jira_queries: vec!["order by updated desc".to_string()],
             github_project: None,
             jira_config: None,
         };
@@ -967,6 +982,117 @@ mod tests {
         assert_eq!(response.warnings[0].source, WorkSource::GitHub);
         assert!(response.warnings[0].message.contains("rust-lang/rust"));
         assert!(response.warnings[0].message.contains("gh auth expired"));
+    }
+
+    // Matches `acli` calls by their `--jql` argument; treats `view` (planning-date
+    // enrichment) calls as failures so enrichment stays best-effort in tests.
+    struct JiraQueryMock {
+        by_jql: HashMap<String, CommandResult<String>>,
+    }
+
+    impl CommandRunner for JiraQueryMock {
+        fn run(&self, _program: &str, args: &[&str]) -> CommandResult<String> {
+            if args.iter().any(|arg| *arg == "view") {
+                return Err(CommandRunnerError::new("no per-issue view in test"));
+            }
+            let jql = args
+                .windows(2)
+                .find_map(|window| (window[0] == "--jql").then_some(window[1]))
+                .unwrap_or("");
+            self.by_jql
+                .get(jql)
+                .cloned()
+                .unwrap_or_else(|| Err(CommandRunnerError::new(format!("unexpected jql: {jql}"))))
+        }
+    }
+
+    fn jira_search_payload(key: &str, summary: &str) -> String {
+        format!(
+            r#"[{{"key":"{key}","fields":{{"summary":"{summary}","status":{{"name":"To Do"}}}}}}]"#
+        )
+    }
+
+    fn jira_cli_state(runner: JiraQueryMock, jira_queries: Vec<String>) -> AppState {
+        AppState {
+            // Empty GitHub repos: emits a warning-only chunk with no items, so it
+            // doesn't interfere with the Jira item chunks under test.
+            github_source: GitHubSource::Cli,
+            jira_source: JiraSource::Cli,
+            cache: Arc::new(ResponseCache::new(Duration::from_secs(30))),
+            runner: Arc::new(runner),
+            github_repos: Vec::new(),
+            jira_queries,
+            github_project: None,
+            jira_config: None,
+        }
+    }
+
+    #[test]
+    fn resolve_work_items_streams_one_chunk_per_jira_project() {
+        let queries = vec![
+            "project = SSW ORDER BY updated DESC".to_string(),
+            "project = TEI ORDER BY updated DESC".to_string(),
+        ];
+        let runner = JiraQueryMock {
+            by_jql: HashMap::from([
+                (queries[0].clone(), Ok(jira_search_payload("SSW-1", "S one"))),
+                (queries[1].clone(), Ok(jira_search_payload("TEI-1", "T one"))),
+            ]),
+        };
+        let state = jira_cli_state(runner, queries);
+
+        // Record the number of Jira items in each emitted chunk.
+        let mut jira_chunk_sizes: Vec<usize> = Vec::new();
+        resolve_work_items(&state, |chunk| {
+            if let StreamChunk::Items { data, .. } = chunk {
+                let jira = data
+                    .iter()
+                    .filter(|item| item.source == WorkSource::Jira)
+                    .count();
+                if jira > 0 {
+                    jira_chunk_sizes.push(jira);
+                }
+            }
+        });
+
+        // Two projects -> two separate item chunks, one item each.
+        assert_eq!(jira_chunk_sizes, vec![1, 1]);
+    }
+
+    #[test]
+    fn fetch_work_items_keeps_successful_jira_project_items_when_one_query_fails() {
+        let queries = vec![
+            "project = SSW ORDER BY updated DESC".to_string(),
+            "project = TEI ORDER BY updated DESC".to_string(),
+        ];
+        let runner = JiraQueryMock {
+            by_jql: HashMap::from([
+                (queries[0].clone(), Ok(jira_search_payload("SSW-1", "S one"))),
+                (
+                    queries[1].clone(),
+                    Err(CommandRunnerError::new("acli auth expired")),
+                ),
+            ]),
+        };
+        let state = jira_cli_state(runner, queries);
+
+        let response = fetch_work_items(&state);
+
+        let jira_items: Vec<_> = response
+            .data
+            .iter()
+            .filter(|item| item.source == WorkSource::Jira)
+            .collect();
+        assert_eq!(jira_items.len(), 1);
+        assert_eq!(jira_items[0].container, "SSW");
+
+        let jira_warnings: Vec<_> = response
+            .warnings
+            .iter()
+            .filter(|warning| warning.source == WorkSource::Jira)
+            .collect();
+        assert_eq!(jira_warnings.len(), 1);
+        assert!(jira_warnings[0].message.contains("acli auth expired"));
     }
 
     #[tokio::test]
@@ -1244,7 +1370,7 @@ mod tests {
                     .expect("fixture should read"),
             }),
             github_repos: vec!["openai/quasar".to_string()],
-            jira_jql: "order by updated desc".to_string(),
+            jira_queries: vec!["order by updated desc".to_string()],
             github_project: Some(GitHubProject {
                 owner: "QuEraComputing".into(),
                 number: 18,
@@ -1336,7 +1462,7 @@ mod tests {
                     .expect("fixture should read"),
             }),
             github_repos: vec!["openai/quasar".to_string()],
-            jira_jql: "order by updated desc".to_string(),
+            jira_queries: vec!["order by updated desc".to_string()],
             github_project: Some(GitHubProject {
                 owner: "QuEraComputing".into(),
                 number: 18,
@@ -1383,7 +1509,7 @@ mod tests {
             cache: Arc::new(ResponseCache::new(Duration::from_secs(30))),
             runner: Arc::new(MockCommandRunner::new(HashMap::new())),
             github_repos: Vec::new(),
-            jira_jql: "order by updated desc".to_string(),
+            jira_queries: vec!["order by updated desc".to_string()],
             github_project: None,
             jira_config: None,
         };
@@ -1429,7 +1555,7 @@ mod tests {
             cache: Arc::new(ResponseCache::new(Duration::from_secs(30))),
             runner: Arc::new(Runner),
             github_repos: vec!["o/r".to_string()],
-            jira_jql: "order by updated desc".to_string(),
+            jira_queries: vec!["order by updated desc".to_string()],
             github_project: Some(GitHubProject {
                 owner: "QuEraComputing".into(),
                 number: 18,
@@ -1478,7 +1604,7 @@ mod tests {
             cache: Arc::new(ResponseCache::new(Duration::from_secs(30))),
             runner,
             github_repos: Vec::new(),
-            jira_jql: "order by updated desc".to_string(),
+            jira_queries: vec!["order by updated desc".to_string()],
             github_project: None,
             jira_config: jira,
         }

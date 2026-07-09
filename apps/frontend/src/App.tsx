@@ -92,7 +92,7 @@ export default function App() {
   const [response, setResponse] = useState<WorkItemsResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
-  const [selectedRepo, setSelectedRepo] = useState<"all" | string>("all");
+  const [selectedContainer, setSelectedContainer] = useState<"all" | string>("all");
   const [selectedSource, setSelectedSource] = useState<"all" | string>("all");
   const [selectedStatus, setSelectedStatus] = useState<"all" | string>("all");
   const [selectedAssignee, setSelectedAssignee] = useState<"all" | string>("all");
@@ -151,13 +151,32 @@ export default function App() {
   }
 
   const items = response?.data ?? [];
-  const availableRepos = Array.from(
-    new Set(
-      items
-        .map((item) => item.repo)
-        .filter((repo): repo is string => repo !== null),
-    ),
-  );
+  // The second filter is source-aware: GitHub repositories, Jira projects, or
+  // both when no source is selected. Values match `WorkItem.container`; Jira
+  // containers carry a "(Jira)" hint in the combined list since project keys
+  // aren't self-evidently boards the way `owner/repo` slugs are.
+  const containersCombined = selectedSource === "all";
+  const containerScopedItems = containersCombined
+    ? items
+    : items.filter((item) => item.source === selectedSource);
+  const containerSources = new Map<string, string>();
+  for (const item of containerScopedItems) {
+    if (item.container) {
+      containerSources.set(item.container, item.source);
+    }
+  }
+  const availableContainers = Array.from(containerSources.entries())
+    .map(([value, source]) => ({
+      value,
+      label: containersCombined && source === "jira" ? `${value} (Jira)` : value,
+    }))
+    .sort((left, right) => left.value.localeCompare(right.value));
+  const containerLabel =
+    selectedSource === "jira"
+      ? "Project"
+      : selectedSource === "github"
+        ? "Repository"
+        : "Repository / Project";
   const availableSources = Array.from(new Set(items.map((item) => item.source)));
   const availableStatuses = Array.from(new Set(items.map((item) => item.status)));
   const assigneeNames = Array.from(
@@ -171,8 +190,8 @@ export default function App() {
   const availableAssignees = hasUnassigned ? [UNASSIGNED, ...assigneeNames] : assigneeNames;
 
   useEffect(() => {
-    if (!isSelectionAvailable(selectedRepo, availableRepos)) {
-      setSelectedRepo("all");
+    if (!isSelectionAvailable(selectedContainer, availableContainers.map((c) => c.value))) {
+      setSelectedContainer("all");
     }
     if (!isSelectionAvailable(selectedSource, availableSources)) {
       setSelectedSource("all");
@@ -184,11 +203,11 @@ export default function App() {
       setSelectedAssignee("all");
     }
   }, [
-    availableRepos,
+    availableContainers,
     availableSources,
     availableStatuses,
     availableAssignees,
-    selectedRepo,
+    selectedContainer,
     selectedSource,
     selectedStatus,
     selectedAssignee,
@@ -196,7 +215,7 @@ export default function App() {
 
   const searchTokens = searchQuery.trim().toLowerCase().split(/\s+/).filter(Boolean);
   const filteredItems = items.filter((item) => {
-    const repoMatches = selectedRepo === "all" || item.repo === selectedRepo;
+    const containerMatches = selectedContainer === "all" || item.container === selectedContainer;
     const sourceMatches = selectedSource === "all" || item.source === selectedSource;
     const statusMatches = selectedStatus === "all" || item.status === selectedStatus;
     const assigneeMatches =
@@ -205,7 +224,7 @@ export default function App() {
         ? item.assignee === null
         : item.assignee === selectedAssignee);
     const searchMatches = searchTokens.length === 0 || matchesSearch(item, searchTokens);
-    return repoMatches && sourceMatches && statusMatches && assigneeMatches && searchMatches;
+    return containerMatches && sourceMatches && statusMatches && assigneeMatches && searchMatches;
   });
   // Status Pulse excludes done items so the chart reflects in-flight work only.
   const pulseItems = filteredItems.filter((item) => classifyStatus(item.status) !== "done");
@@ -295,15 +314,16 @@ export default function App() {
         </div>
 
         <Filters
-          availableRepos={availableRepos}
+          availableContainers={availableContainers}
           availableSources={availableSources}
           availableStatuses={availableStatuses}
           availableAssignees={availableAssignees}
-          onRepoChange={setSelectedRepo}
+          containerLabel={containerLabel}
+          onContainerChange={setSelectedContainer}
           onSourceChange={setSelectedSource}
           onStatusChange={setSelectedStatus}
           onAssigneeChange={setSelectedAssignee}
-          selectedRepo={selectedRepo}
+          selectedContainer={selectedContainer}
           selectedSource={selectedSource}
           selectedStatus={selectedStatus}
           selectedAssignee={selectedAssignee}
