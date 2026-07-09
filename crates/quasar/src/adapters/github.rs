@@ -250,22 +250,34 @@ fn fetch_project_dates(
     let owner_arg = format!("owner={owner}");
     let name_arg = format!("name={name}");
 
-    let raw = runner
-        .run(
-            "gh",
-            &[
-                "api",
-                "graphql",
-                "--paginate",
-                "-f",
-                &query_arg,
-                "-f",
-                &owner_arg,
-                "-f",
-                &name_arg,
-            ],
-        )
-        .ok()?;
+    let raw = match runner.run(
+        "gh",
+        &[
+            "api",
+            "graphql",
+            "--paginate",
+            "-f",
+            &query_arg,
+            "-f",
+            &owner_arg,
+            "-f",
+            &name_arg,
+        ],
+    ) {
+        Ok(raw) => raw,
+        Err(error) => {
+            // Best-effort enrichment: dates stay blank on failure. Surface why,
+            // since the common cause (gh token missing the `project` scope) is
+            // otherwise invisible — the UI just shows empty dates.
+            eprintln!(
+                "warning: could not read GitHub project #{} dates for {repo}: {error}. \
+                 Dates will be blank. If the token lacks Projects access, run: \
+                 gh auth refresh -s project",
+                project.number
+            );
+            return None;
+        }
+    };
 
     let mut map = HashMap::new();
     // `gh --paginate` concatenates one JSON document per page; stream them.
@@ -941,7 +953,17 @@ pub fn enrich_detail_project_fields(
         ("number", issue_number),
     ) {
         Ok(raw) => raw,
-        Err(_) => return out,
+        Err(error) => {
+            // Best-effort: leave dates/status blank on failure, but surface the
+            // reason (commonly a gh token missing the `project` scope).
+            eprintln!(
+                "warning: could not read GitHub project #{} fields for {repo}#{number}: \
+                 {error}. Dates/status will be blank. If the token lacks Projects access, \
+                 run: gh auth refresh -s project",
+                project.number
+            );
+            return out;
+        }
     };
     let parsed: DetailEnrichResponse = match serde_json::from_str(&raw) {
         Ok(p) => p,

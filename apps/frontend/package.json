@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "predev": "fuser -k 5173/tcp 2>/dev/null; sleep 0.4; exit 0",
+    "predev": "lsof -ti tcp:5173 | xargs kill -9 2>/dev/null; sleep 0.4; exit 0",
     "dev": "webpack serve --mode development",
     "build": "tsc --noEmit && webpack --mode production && cp index.html dist/index.html",
     "test": "jest --runInBand"
