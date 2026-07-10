@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 
-import { fetchWorkItemDetail, updateWorkItemField } from "../api";
-import type { WorkItemFieldKind, WorkItemDetail } from "../types";
+import { fetchWorkItemDetail, updateWorkItemAssignees, updateWorkItemField } from "../api";
+import type { AssigneeOption, WorkItemFieldKind, WorkItemDetail } from "../types";
 
 function formatDate(value: string): string {
   return value ? value.slice(0, 10) : "—";
@@ -150,7 +150,21 @@ export default function ItemDetailModal({
                   )}
                 </dd>
                 <dt>Assignee</dt>
-                <dd>{item.assignee ?? "Unassigned"}</dd>
+                <dd>
+                  {(detail?.assignee_options.length ?? 0) > 0 ? (
+                    <EditableAssignees
+                      initialSelected={detail?.assignee_selected ?? []}
+                      itemId={item.id}
+                      onSaved={onItemUpdated}
+                      options={detail?.assignee_options ?? []}
+                      source={item.source}
+                    />
+                  ) : item.assignees.length ? (
+                    item.assignees.join(", ")
+                  ) : (
+                    "Unassigned"
+                  )}
+                </dd>
                 <dt>Author</dt>
                 <dd>{item.author ?? "—"}</dd>
                 {item.priority ? (
@@ -218,6 +232,105 @@ export default function ItemDetailModal({
 }
 
 type SaveState = "idle" | "saving" | "saved" | "error";
+
+function EditableAssignees({
+  itemId,
+  source,
+  options,
+  initialSelected,
+  onSaved,
+}: {
+  itemId: string;
+  source: "github" | "jira";
+  options: AssigneeOption[];
+  initialSelected: string[];
+  onSaved?: () => void;
+}) {
+  const [selected, setSelected] = useState<string[]>(initialSelected);
+  const [state, setState] = useState<SaveState>("idle");
+  const controllerRef = useRef<AbortController | null>(null);
+  useEffect(() => () => controllerRef.current?.abort(), []);
+
+  async function save(next: string[]) {
+    controllerRef.current?.abort();
+    const controller = new AbortController();
+    controllerRef.current = controller;
+    // Optimistic update: reflect the change immediately so the control stays
+    // responsive and rapid successive toggles compute from fresh state.
+    const previous = selected;
+    setSelected(next);
+    setState("saving");
+    try {
+      await updateWorkItemAssignees(itemId, next, controller.signal);
+      if (!controller.signal.aborted) {
+        setState("saved");
+        onSaved?.();
+      }
+    } catch {
+      if (!controller.signal.aborted) {
+        setSelected(previous);
+        setState("error");
+      }
+    }
+  }
+
+  const statusLive = (
+    <span aria-live="polite" className="date-status-live">
+      {state === "saving" ? <span className="date-status">Saving…</span> : null}
+      {state === "saved" ? <span className="date-status date-status-ok">Saved</span> : null}
+      {state === "error" ? (
+        <span className="date-status date-status-err">Couldn't save</span>
+      ) : null}
+    </span>
+  );
+
+  if (source === "jira") {
+    const value = selected[0] ?? "";
+    return (
+      <span className="editable-status">
+        <select
+          aria-label="Assignee"
+          className="status-select"
+          onChange={(event) => {
+            const next = event.target.value ? [event.target.value] : [];
+            void save(next);
+          }}
+          value={value}
+        >
+          <option value="">(none)</option>
+          {options.map((option) => (
+            <option key={option.id} value={option.id}>
+              {option.name}
+            </option>
+          ))}
+        </select>
+        {statusLive}
+      </span>
+    );
+  }
+
+  const toggle = (id: string) => {
+    const next = selected.includes(id)
+      ? selected.filter((value) => value !== id)
+      : [...selected, id];
+    void save(next);
+  };
+  return (
+    <span className="editable-assignees">
+      {options.map((option) => (
+        <label className="assignee-option" key={option.id}>
+          <input
+            checked={selected.includes(option.id)}
+            onChange={() => toggle(option.id)}
+            type="checkbox"
+          />
+          {option.name}
+        </label>
+      ))}
+      {statusLive}
+    </span>
+  );
+}
 
 function EditableDate({
   itemId,

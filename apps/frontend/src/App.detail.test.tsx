@@ -18,7 +18,7 @@ const listResponse: WorkItemsResponse = {
       title: "Investigate sync gap",
       url: "https://example.com/issues/123",
       status: "open",
-      assignee: "kai",
+      assignees: ["kai"],
       labels: [],
       priority: null,
       created_at: "2026-07-06T10:00:00Z",
@@ -42,6 +42,8 @@ const detail: WorkItemDetail = {
   comments: [],
   project_status: null,
   status_options: [],
+  assignee_options: [],
+  assignee_selected: [],
 };
 
 // Mocks the streaming client so it delivers a whole response as one chunk.

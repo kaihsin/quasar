@@ -1,7 +1,7 @@
 import type { WorkItem } from "../types";
 
 export default function SummaryCards({ items }: { items: WorkItem[] }) {
-  const assignedCount = items.filter((item) => item.assignee).length;
+  const assignedCount = items.filter((item) => item.assignees.length > 0).length;
   const sourceCount = new Set(items.map((item) => item.source)).size;
 
   const cards = [

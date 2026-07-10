@@ -5,10 +5,11 @@ import { streamWorkItems } from "./api";
 import ActivityPanel from "./components/ActivityPanel";
 import ItemDetailModal from "./components/ItemDetailModal";
 import Filters from "./components/Filters";
-import Avatar from "./components/Avatar";
+import PeoplePage from "./components/PeoplePage";
 import StatusChart from "./components/StatusChart";
 import SummaryCards from "./components/SummaryCards";
 import Timeline from "./components/Timeline";
+import WorkItemCard from "./components/WorkItemCard";
 import type { WorkItem, WorkItemsResponse } from "./types";
 
 const fallbackItems = [
@@ -41,14 +42,6 @@ function classifyStatus(status: string): ColumnKey {
   return "open";
 }
 
-// Renders an ISO date/datetime as YYYY-MM-DD, or an em dash when unset.
-function formatDate(value: string): string {
-  if (!value) {
-    return "—";
-  }
-  return value.slice(0, 10);
-}
-
 // Numeric issue number for ordering: GitHub "845" -> 845, Jira "SSW-1131" -> 1131.
 function issueNumber(item: WorkItem): number {
   const match = item.external_id.match(/(\d+)\s*$/);
@@ -79,7 +72,7 @@ function matchesSearch(item: WorkItem, tokens: string[]): boolean {
     item.status,
     item.container,
     item.repo ?? "",
-    item.assignee ?? "",
+    ...item.assignees,
     item.author ?? "",
     ...item.labels,
   ]
@@ -94,10 +87,10 @@ export default function App() {
   const [isLoading, setIsLoading] = useState(false);
   const [selectedContainer, setSelectedContainer] = useState<"all" | string>("all");
   const [selectedSource, setSelectedSource] = useState<"all" | string>("all");
-  const [selectedStatus, setSelectedStatus] = useState<"all" | string>("all");
-  const [selectedAssignee, setSelectedAssignee] = useState<"all" | string>("all");
+  const [selectedStatuses, setSelectedStatuses] = useState<string[]>([]);
+  const [selectedAssignees, setSelectedAssignees] = useState<string[]>([]);
   const [searchQuery, setSearchQuery] = useState("");
-  const [view, setView] = useState<"board" | "timeline">("board");
+  const [view, setView] = useState<"board" | "timeline" | "people">("board");
   const [selectedItemId, setSelectedItemId] = useState<string | null>(null);
 
   useEffect(() => {
@@ -122,9 +115,13 @@ export default function App() {
           onChunk: (data, warnings) => {
             setResponse((prev) => {
               const base = prev ?? { data: [], warnings: [], fetched_at: "", cache_status: "" };
+              // A ticket can match multiple queries and arrive in more than one
+              // chunk under the same id; drop ids we've already merged.
+              const seen = new Set(base.data.map((item) => item.id));
+              const fresh = data.filter((item) => !seen.has(item.id));
               return {
                 ...base,
-                data: [...base.data, ...data],
+                data: [...base.data, ...fresh],
                 warnings: [...base.warnings, ...warnings],
               };
             });
@@ -180,13 +177,9 @@ export default function App() {
   const availableSources = Array.from(new Set(items.map((item) => item.source)));
   const availableStatuses = Array.from(new Set(items.map((item) => item.status)));
   const assigneeNames = Array.from(
-    new Set(
-      items
-        .map((item) => item.assignee)
-        .filter((assignee): assignee is string => assignee !== null),
-    ),
+    new Set(items.flatMap((item) => item.assignees)),
   ).sort((left, right) => left.localeCompare(right));
-  const hasUnassigned = items.some((item) => item.assignee === null);
+  const hasUnassigned = items.some((item) => item.assignees.length === 0);
   const availableAssignees = hasUnassigned ? [UNASSIGNED, ...assigneeNames] : assigneeNames;
 
   useEffect(() => {
@@ -196,12 +189,17 @@ export default function App() {
     if (!isSelectionAvailable(selectedSource, availableSources)) {
       setSelectedSource("all");
     }
-    if (!isSelectionAvailable(selectedStatus, availableStatuses)) {
-      setSelectedStatus("all");
-    }
-    if (!isSelectionAvailable(selectedAssignee, availableAssignees)) {
-      setSelectedAssignee("all");
-    }
+    // Prune any selected status/assignee that is no longer available. Returning
+    // the same reference when nothing changed keeps this effect (whose
+    // `available*` deps are fresh arrays each render) from looping.
+    setSelectedStatuses((prev) => {
+      const next = prev.filter((value) => availableStatuses.includes(value));
+      return next.length === prev.length ? prev : next;
+    });
+    setSelectedAssignees((prev) => {
+      const next = prev.filter((value) => availableAssignees.includes(value));
+      return next.length === prev.length ? prev : next;
+    });
   }, [
     availableContainers,
     availableSources,
@@ -209,20 +207,18 @@ export default function App() {
     availableAssignees,
     selectedContainer,
     selectedSource,
-    selectedStatus,
-    selectedAssignee,
   ]);
 
   const searchTokens = searchQuery.trim().toLowerCase().split(/\s+/).filter(Boolean);
   const filteredItems = items.filter((item) => {
     const containerMatches = selectedContainer === "all" || item.container === selectedContainer;
     const sourceMatches = selectedSource === "all" || item.source === selectedSource;
-    const statusMatches = selectedStatus === "all" || item.status === selectedStatus;
+    const statusMatches =
+      selectedStatuses.length === 0 || selectedStatuses.includes(item.status);
     const assigneeMatches =
-      selectedAssignee === "all" ||
-      (selectedAssignee === UNASSIGNED
-        ? item.assignee === null
-        : item.assignee === selectedAssignee);
+      selectedAssignees.length === 0 ||
+      (selectedAssignees.includes(UNASSIGNED) && item.assignees.length === 0) ||
+      item.assignees.some((name) => selectedAssignees.includes(name));
     const searchMatches = searchTokens.length === 0 || matchesSearch(item, searchTokens);
     return containerMatches && sourceMatches && statusMatches && assigneeMatches && searchMatches;
   });
@@ -292,6 +288,15 @@ export default function App() {
               >
                 Timeline
               </button>
+              <button
+                aria-selected={view === "people"}
+                className="view-tab"
+                onClick={() => setView("people")}
+                role="tab"
+                type="button"
+              >
+                People
+              </button>
             </div>
             <span className="status-pill">
               {response?.cache_status ? `Cache ${response.cache_status}` : "Read-only v1"}
@@ -321,12 +326,12 @@ export default function App() {
           containerLabel={containerLabel}
           onContainerChange={setSelectedContainer}
           onSourceChange={setSelectedSource}
-          onStatusChange={setSelectedStatus}
-          onAssigneeChange={setSelectedAssignee}
+          onStatusesChange={setSelectedStatuses}
+          onAssigneesChange={setSelectedAssignees}
           selectedContainer={selectedContainer}
           selectedSource={selectedSource}
-          selectedStatus={selectedStatus}
-          selectedAssignee={selectedAssignee}
+          selectedStatuses={selectedStatuses}
+          selectedAssignees={selectedAssignees}
         />
 
         {response?.warnings.length ? (
@@ -339,7 +344,9 @@ export default function App() {
           </div>
         ) : null}
 
-        {filteredItems.length && view === "timeline" ? (
+        {view === "people" ? (
+          <PeoplePage onOpenItem={setSelectedItemId} />
+        ) : filteredItems.length && view === "timeline" ? (
           <Timeline items={filteredItems} />
         ) : filteredItems.length ? (
           <div
@@ -406,54 +413,5 @@ export default function App() {
         />
       ) : null}
     </main>
-  );
-}
-
-function WorkItemCard({ item, onOpen }: { item: WorkItem; onOpen: () => void }) {
-  const location = item.source === "github" && item.repo ? item.repo : item.container;
-
-  return (
-    <article className="work-item">
-      <div className="work-item-head">
-        <span className="work-item-number">{item.external_id}</span>
-        <span className={`source-badge source-${item.source}`}>{item.source}</span>
-        <button className="work-item-title work-item-title-button" onClick={onOpen} type="button">
-          {item.title}
-        </button>
-        <a
-          aria-label="Open original in new tab"
-          className="work-item-external"
-          href={item.url}
-          rel="noreferrer"
-          target="_blank"
-        >
-          ↗
-        </a>
-        <span className="work-item-location">{location}</span>
-        <Avatar name={item.assignee} />
-      </div>
-      <div className="work-item-dates">
-        <span className="date-chip">
-          <span className="date-label">Start</span>
-          <span className="date-value">{formatDate(item.start_date)}</span>
-        </span>
-        <span className="date-chip date-chip-target">
-          <span className="date-label">Target</span>
-          <span className="date-value">{formatDate(item.target_date)}</span>
-        </span>
-      </div>
-      <div className="work-item-sub">
-        <span className="status-chip">{item.status}</span>
-        <span className="item-meta">
-          {item.assignee ? `Assigned to ${item.assignee}` : "Unassigned"}
-          {item.priority ? ` • Priority ${item.priority}` : ""}
-        </span>
-        {item.labels.map((label) => (
-          <span className="label-pill" key={label}>
-            {label}
-          </span>
-        ))}
-      </div>
-    </article>
   );
 }

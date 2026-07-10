@@ -401,11 +401,23 @@ button {
   padding: 3px 0;
 }
 
+/* Keep the label column pinned while only the time track scrolls sideways.
+   Opaque background + higher z-index so scrolling bars and the "today" marker
+   pass underneath. `.timeline-label-spacer` is the axis row's matching cell. */
+.timeline-label-spacer,
+.timeline-label {
+  position: sticky;
+  left: 0;
+  z-index: 3;
+  background: #fff;
+}
+
 .timeline-label {
   display: flex;
   align-items: center;
   gap: 8px;
   min-width: 0;
+  padding-right: 8px;
 }
 
 .timeline-title {
@@ -1008,4 +1020,53 @@ button {
   border-radius: 6px;
   background: #fff;
   color: inherit;
+}
+.avatar-stack {
+  display: inline-flex;
+  align-items: center;
+}
+.avatar-stack .avatar:not(:first-child) {
+  margin-left: -6px;
+}
+
+.multiselect { position: relative; }
+.multiselect-toggle {
+  width: 100%;
+  text-align: left;
+  padding: 8px 12px;
+  border: 1px solid rgba(20, 33, 61, 0.12);
+  border-radius: 10px;
+  background: #fff;
+  color: #14213d;
+  cursor: pointer;
+}
+.multiselect-menu {
+  position: absolute; z-index: 20; margin-top: 4px; max-height: 240px; overflow-y: auto;
+  min-width: 100%; border: 1px solid rgba(20, 33, 61, 0.15); border-radius: 6px;
+  background: #fff;
+  box-shadow: 0 6px 18px rgba(20, 33, 61, 0.18); padding: 4px;
+}
+.multiselect-option { display: flex; align-items: center; gap: 8px; padding: 4px 6px; white-space: nowrap; }
+.multiselect-empty { display: block; padding: 6px; color: #7a8699; }
+
+.editable-assignees {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.assignee-option {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.people-sections {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  margin-top: 14px;
+}
+
+.people-section h3 {
+  margin: 0 0 8px;
 }

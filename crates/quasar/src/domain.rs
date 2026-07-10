@@ -29,7 +29,8 @@ pub struct WorkItem {
     pub title: String,
     pub url: String,
     pub status: String,
-    pub assignee: Option<String>,
+    #[serde(default)]
+    pub assignees: Vec<String>,
     pub labels: Vec<String>,
     pub priority: Option<String>,
     pub created_at: String,
@@ -52,6 +53,12 @@ pub struct Comment {
     pub body: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AssigneeOption {
+    pub id: String,
+    pub name: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WorkItemDetail {
     pub item: WorkItem,
@@ -61,6 +68,10 @@ pub struct WorkItemDetail {
     pub project_status: Option<String>,
     #[serde(default)]
     pub status_options: Vec<String>,
+    #[serde(default)]
+    pub assignee_options: Vec<AssigneeOption>,
+    #[serde(default)]
+    pub assignee_selected: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -102,7 +113,7 @@ mod tests {
             title: "Investigate sync gap".to_string(),
             url: "https://example.com/issues/123".to_string(),
             status: "open".to_string(),
-            assignee: Some("kai".to_string()),
+            assignees: vec!["kai".to_string()],
             labels: vec!["bug".to_string(), "infra".to_string()],
             priority: Some("medium".to_string()),
             created_at: "2026-07-06T10:00:00Z".to_string(),
@@ -156,7 +167,7 @@ mod tests {
             title: "Investigate sync gap".to_string(),
             url: "https://example.com/issues/123".to_string(),
             status: "open".to_string(),
-            assignee: None,
+            assignees: Vec::new(),
             labels: vec![],
             priority: None,
             created_at: "2026-07-06T10:00:00Z".to_string(),
@@ -177,6 +188,8 @@ mod tests {
             }],
             project_status: None,
             status_options: Vec::new(),
+            assignee_options: Vec::new(),
+            assignee_selected: Vec::new(),
         };
 
         let serialized = serde_json::to_value(detail).expect("detail should serialize");
@@ -198,7 +211,7 @@ mod tests {
             title: "Investigate sync gap".to_string(),
             url: "https://example.com/issues/123".to_string(),
             status: "open".to_string(),
-            assignee: None,
+            assignees: Vec::new(),
             labels: vec![],
             priority: None,
             created_at: "2026-07-06T10:00:00Z".to_string(),
@@ -219,6 +232,8 @@ mod tests {
                 "In Progress".to_string(),
                 "Done".to_string(),
             ],
+            assignee_options: Vec::new(),
+            assignee_selected: Vec::new(),
         };
         let serialized = serde_json::to_value(detail).expect("serialize");
         assert_eq!(serialized["project_status"], "In Progress");

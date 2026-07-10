@@ -1,3 +1,5 @@
+import { useEffect, useRef, useState } from "react";
+
 type FilterValue = "all" | string;
 
 // A container is a GitHub repository or a Jira project. `value` is matched
@@ -13,12 +15,12 @@ export default function Filters({
   containerLabel,
   selectedContainer,
   selectedSource,
-  selectedStatus,
-  selectedAssignee,
+  selectedStatuses,
+  selectedAssignees,
   onContainerChange,
   onSourceChange,
-  onStatusChange,
-  onAssigneeChange,
+  onStatusesChange,
+  onAssigneesChange,
 }: {
   availableContainers: ContainerOption[];
   availableSources: string[];
@@ -27,12 +29,12 @@ export default function Filters({
   containerLabel: string;
   selectedContainer: FilterValue;
   selectedSource: FilterValue;
-  selectedStatus: FilterValue;
-  selectedAssignee: FilterValue;
+  selectedStatuses: string[];
+  selectedAssignees: string[];
   onContainerChange: (value: FilterValue) => void;
   onSourceChange: (value: FilterValue) => void;
-  onStatusChange: (value: FilterValue) => void;
-  onAssigneeChange: (value: FilterValue) => void;
+  onStatusesChange: (values: string[]) => void;
+  onAssigneesChange: (values: string[]) => void;
 }) {
   return (
     <section aria-label="Filters" className="filters-panel">
@@ -70,35 +72,104 @@ export default function Filters({
 
       <div className="filter-field">
         <label htmlFor="status-filter">Status</label>
-        <select
+        <MultiSelectDropdown
           id="status-filter"
-          onChange={(event) => onStatusChange(event.target.value)}
-          value={selectedStatus}
-        >
-          <option value="all">All</option>
-          {availableStatuses.map((status) => (
-            <option key={status} value={status}>
-              {status}
-            </option>
-          ))}
-        </select>
+          menuLabel="Status"
+          options={availableStatuses}
+          selected={selectedStatuses}
+          onChange={onStatusesChange}
+        />
       </div>
 
       <div className="filter-field">
         <label htmlFor="assignee-filter">Assignee</label>
-        <select
+        <MultiSelectDropdown
           id="assignee-filter"
-          onChange={(event) => onAssigneeChange(event.target.value)}
-          value={selectedAssignee}
-        >
-          <option value="all">All</option>
-          {availableAssignees.map((assignee) => (
-            <option key={assignee} value={assignee}>
-              {assignee}
-            </option>
-          ))}
-        </select>
+          menuLabel="Assignee"
+          options={availableAssignees}
+          selected={selectedAssignees}
+          onChange={onAssigneesChange}
+        />
       </div>
     </section>
+  );
+}
+
+// A checkbox-dropdown for OR-filtering by a set of values (used for Status and
+// Assignee). Empty selection means "All". `menuLabel` names the popup for
+// assistive tech and labels the toggle button via the field's <label htmlFor>.
+function MultiSelectDropdown({
+  id,
+  menuLabel,
+  options,
+  selected,
+  onChange,
+}: {
+  id: string;
+  menuLabel: string;
+  options: string[];
+  selected: string[];
+  onChange: (values: string[]) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    function onDocClick(event: MouseEvent) {
+      if (ref.current && !ref.current.contains(event.target as Node)) {
+        setOpen(false);
+      }
+    }
+    function onKey(event: KeyboardEvent) {
+      if (event.key === "Escape") setOpen(false);
+    }
+    document.addEventListener("mousedown", onDocClick);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDocClick);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+
+  const label = selected.length === 0 ? "All" : `${selected.length} selected`;
+  const toggle = (value: string) =>
+    onChange(
+      selected.includes(value)
+        ? selected.filter((v) => v !== value)
+        : [...selected, value],
+    );
+
+  return (
+    <div className="multiselect" ref={ref}>
+      <button
+        aria-expanded={open}
+        aria-haspopup="true"
+        className="multiselect-toggle"
+        id={id}
+        onClick={() => setOpen((v) => !v)}
+        type="button"
+      >
+        {label} ▾
+      </button>
+      {open ? (
+        <div aria-label={menuLabel} className="multiselect-menu" role="group">
+          {options.length === 0 ? (
+            <span className="multiselect-empty">No options</span>
+          ) : (
+            options.map((option) => (
+              <label className="multiselect-option" key={option}>
+                <input
+                  checked={selected.includes(option)}
+                  onChange={() => toggle(option)}
+                  type="checkbox"
+                />
+                {option}
+              </label>
+            ))
+          )}
+        </div>
+      ) : null}
+    </div>
   );
 }

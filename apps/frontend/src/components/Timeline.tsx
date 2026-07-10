@@ -1,5 +1,7 @@
+import { useLayoutEffect, useRef } from "react";
+
 import type { WorkItem } from "../types";
-import Avatar from "./Avatar";
+import AssigneeAvatars from "./AssigneeAvatars";
 
 function toTime(value: string): number | null {
   if (!value) {
@@ -57,6 +59,8 @@ function UndatedList({ items }: { items: WorkItem[] }) {
 }
 
 export default function Timeline({ items }: { items: WorkItem[] }) {
+  const scrollRef = useRef<HTMLDivElement>(null);
+
   const rows = items.map((item) => {
     const start = toTime(item.start_date);
     const end = toTime(item.target_date);
@@ -68,15 +72,7 @@ export default function Timeline({ items }: { items: WorkItem[] }) {
     (row): row is DatedRow => row.start !== null && row.end !== null,
   );
   const undated = rows.filter((row) => row.start === null).map((row) => row.item);
-
-  if (!dated.length) {
-    return (
-      <section aria-label="Timeline" className="timeline">
-        <p className="empty-state">No issues have a start or target date yet.</p>
-        <UndatedList items={undated} />
-      </section>
-    );
-  }
+  const hasDated = dated.length > 0;
 
   // Layout constants (must match the grid columns in styles.css).
   const LABEL_COL = 240;
@@ -85,22 +81,42 @@ export default function Timeline({ items }: { items: WorkItem[] }) {
 
   // Extend the domain to include "today" so the marker is always visible.
   const today = Date.now();
-  const min = Math.min(...dated.map((row) => row.start), today);
-  const max = Math.max(...dated.map((row) => row.end), today);
+  const min = hasDated ? Math.min(...dated.map((row) => row.start), today) : today;
+  const max = hasDated ? Math.max(...dated.map((row) => row.end), today) : today;
   const span = Math.max(max - min, 1);
   const percent = (time: number) => ((time - min) / span) * 100;
 
   dated.sort((left, right) => left.start - right.start || left.end - right.end);
-  const ticks = monthTicks(min, max);
+  const ticks = hasDated ? monthTicks(min, max) : [];
 
   // Give each month room so the timeline scrolls horizontally when it's long.
   const trackWidth = Math.max(ticks.length * 120, 560);
   const contentWidth = trackOffset + trackWidth;
   const todayLeft = trackOffset + (percent(today) / 100) * trackWidth;
+  // Scroll offset that lands "today" at the start of the track (just right of
+  // the sticky label column): viewportX = contentX - scrollLeft = trackOffset.
+  const todayScrollLeft = Math.max(0, todayLeft - trackOffset);
+
+  // Default the horizontal scroll so "today" sits at the track start. Runs
+  // before paint to avoid a flash of the far-left (earliest-date) position.
+  useLayoutEffect(() => {
+    if (hasDated && scrollRef.current) {
+      scrollRef.current.scrollLeft = todayScrollLeft;
+    }
+  }, [hasDated, todayScrollLeft]);
+
+  if (!hasDated) {
+    return (
+      <section aria-label="Timeline" className="timeline">
+        <p className="empty-state">No issues have a start or target date yet.</p>
+        <UndatedList items={undated} />
+      </section>
+    );
+  }
 
   return (
     <section aria-label="Timeline" className="timeline">
-      <div className="timeline-scroll">
+      <div className="timeline-scroll" ref={scrollRef}>
         <div className="timeline-content" style={{ minWidth: `${contentWidth}px` }}>
           <div className="timeline-today" style={{ left: `${todayLeft}px` }} aria-hidden="true">
             <span className="timeline-today-label">Today</span>
@@ -128,7 +144,7 @@ export default function Timeline({ items }: { items: WorkItem[] }) {
               return (
                 <div className="timeline-row" key={item.id}>
                   <div className="timeline-label">
-                    <Avatar name={item.assignee} />
+                    <AssigneeAvatars names={item.assignees} />
                     <span className="work-item-number">{item.external_id}</span>
                     <a
                       className="timeline-title"

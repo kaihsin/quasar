@@ -115,17 +115,29 @@ Example config:
 
 ```toml
 bind_addr = "127.0.0.1:3000"
-cache_ttl_secs = 30
+cache_ttl_secs = 30                # work-items response cache TTL (seconds)
+jira_date_cache_ttl_secs = 600     # per-issue Jira Start/Target date cache TTL (seconds)
 mode = "cli"
 github_repos = [
   "openai/quasar",
   "rust-lang/rust",
   "tokio-rs/tokio",
 ]
+# Optional: the Jira site domain used to build work-item browse links.
+# Defaults to https://quera.atlassian.net. Set it to match the site `acli`
+# is authenticated to (and the write-path [jira].base_url below).
+jira_base_url = "https://quera.atlassian.net"
+
 # Which Jira project(s) to pull work items from. Keys compose a
 # `project in (...)` clause; ordering defaults to `ORDER BY updated DESC`.
 [jira_board]
 projects = ["ENG"]
+
+# Optional: pull every ticket assigned to OR created by these people, across
+# all projects on the site (not just [jira_board]). Emails must be non-empty
+# and contain no whitespace or double-quote characters.
+[jira_people]
+users = ["alice@example.com", "bob@example.com"]
 
 # Optional: an extra raw JQL filter AND'd with the [jira_board] selection above.
 # Its own `ORDER BY`, if present, becomes the query's ordering. Omit [jira_board]
@@ -225,6 +237,41 @@ pieces:
   query, so it narrows the results (e.g. exclude Done). A single trailing
   `ORDER BY` is applied: the raw clause's own `ORDER BY` if it has one, otherwise
   the default `ORDER BY updated DESC`.
+- **`[jira_people]`** (optional) — `users = ["email", ...]` pulls every ticket
+  **assigned to** OR **created by** the listed people across **all** projects on
+  the site (not just those in `[jira_board]`). Mechanically it appends **one**
+  extra `acli` query, `(assignee in (...) OR reporter in (...))`, to the
+  per-project fan-out, streamed as its own chunk. Emails are validated
+  (non-empty, no whitespace, no double-quote). Its results are merged with the
+  board results and **de-duplicated by issue key**, so a ticket that is both in
+  a configured project and matches a person appears **once**. `jira_jql` is
+  AND'd into the person query too, so set e.g. `jira_jql = "statusCategory != Done"`
+  to bound it — "all tickets related to a person" can be large (a prolific
+  reporter can have hundreds), and each fetched item still costs a per-issue
+  `view` call for planning-date enrichment, so a large person set slows refresh.
+
+**Planning-date enrichment (per-issue, cached).** `acli`'s bulk
+`workitem search` cannot return the Start/Target custom fields, so the backend
+enriches each issue's planning dates with a separate `acli workitem view` call
+per issue key. Those per-issue results are **cached in memory, keyed by issue
+key**, with a configurable TTL **`jira_date_cache_ttl_secs`** (default **600**
+seconds). On each refresh only issues **missing from the cache (or past the
+TTL)** are re-fetched, so subsequent refreshes are much faster than the first.
+Editing a Jira Target start/Target end date through the app **invalidates that
+issue's cached dates immediately**, so your own edits reflect right away; only
+*external* date changes can be stale until the TTL expires. This cache is
+in-memory only and is lost on restart, and it is **separate** from the
+short-lived work-items response cache (`cache_ttl_secs`, default 30s).
+
+Source fetching is **concurrent**: GitHub repos and Jira queries are resolved in
+parallel (rather than sequentially) and each is streamed to the UI as it
+completes, so a cold refresh takes about as long as the single slowest source
+instead of the sum of them all.
+
+The browse link on each Jira card (and the `↗` original link) is built from
+**`jira_base_url`** (top-level, optional, default `https://quera.atlassian.net`).
+Set it to match the site `acli` is authenticated to; it should also match the
+write-path `[jira].base_url`, which remains a separate key with the same default.
 
 Composition examples (each line is a separate `acli` query):
 
@@ -249,6 +296,21 @@ projects = ["SSW", "ENG"]
 
 # escape hatch: no [jira_board], raw JQL is the sole query, verbatim
 jira_jql = "project = SSW AND statusCategory != Done ORDER BY updated DESC"
+
+# [jira_people] -> one extra cross-project query, merged + deduped by key
+[jira_board]
+projects = ["SSW", "ENG"]
+[jira_people]
+users = ["alice@example.com", "bob@example.com"]
+# -> project = SSW ORDER BY updated DESC
+# -> project = ENG ORDER BY updated DESC
+# -> (assignee in ("alice@example.com","bob@example.com") OR reporter in ("alice@example.com","bob@example.com")) ORDER BY updated DESC
+
+# jira_jql bounds the person query too (AND'd in)
+jira_jql = "statusCategory != Done"
+[jira_people]
+users = ["alice@example.com"]
+# -> ((assignee in ("alice@example.com") OR reporter in ("alice@example.com")) AND (statusCategory != Done)) ORDER BY updated DESC
 ```
 
 To combine boards with a filter, `[jira_board]` selects the project(s) (union)
@@ -259,8 +321,10 @@ omit `[jira_board]` and write the whole query in `jira_jql`.
 
 Clicking a work-item card's title opens an overlay with the full issue/ticket
 body (rendered Markdown), the comment thread, and a metadata sidebar (status,
-assignee, author, labels, priority, dates, repo/project, and a link to the
-original). Detail is fetched lazily only when an item is opened, via
+assignees, author, labels, priority, dates, repo/project, and a link to the
+original). A work item carries a **list** of assignees — GitHub issues can have
+several, Jira has 0 or 1 — rendered as stacked avatars on cards and in the
+timeline. Detail is fetched lazily only when an item is opened, via
 `GET /api/work-item-detail?id=<work-item-id>`, and is not cached — each open
 fetches fresh from `gh issue view` / `acli jira workitem view`. The `↗` link on
 each card still opens the original issue/ticket in a new tab.
@@ -302,6 +366,59 @@ base_url = "https://your-site.atlassian.net"
 The token is stored in plaintext in `config.toml`, so keep the file readable
 only by you (`chmod 600`). Without a `[jira]` block, Jira fields stay read-only
 and edit attempts return `409`.
+
+Assignees are also editable inline. The list of assignable candidates is fetched
+lazily when an item is opened (GitHub `gh api repos/<repo>/assignees`; Jira
+`GET /rest/api/3/user/assignable/search?issueKey=<key>`) on a best-effort basis
+— if it can't be fetched, the assignee field renders read-only. Editing behaves
+per source:
+
+- **GitHub** — a checkbox list of the repo's assignable users; you can assign
+  several. Writes go through `gh issue edit --add-assignee`/`--remove-assignee`
+  (the backend diffs current vs. desired). This needs a `gh` token with write
+  access to the repo's issues; it does **not** require the Projects v2 `project`
+  scope or a `[github_project]` config.
+- **Jira** — a single-select dropdown (with a `(none)` option to unassign),
+  since Jira allows exactly one assignee. Writes go through the Jira REST API
+  (`PUT /rest/api/3/issue/<key>` with the assignee `accountId`, or `null` to
+  clear) and therefore require the `[jira]` credentials block, same as
+  date/status editing.
+
+Both sources use the same endpoint, `PATCH /api/work-item-assignees`
+(`{ id, assignee_ids: [...] }`).
+
+## People Page
+
+Alongside the **Board** and **Timeline** views, a third **People** tab tracks a
+specific configured person's Jira tickets, fetched **on demand**. Opening the
+tab lists the configured `[jira_people]` emails in a single-select dropdown;
+**nothing is fetched until a person is selected** (lazy). Selecting a person
+fetches, via `GET /api/person-work-items?user=<email>`, two groups:
+
+- **Created by** — tickets where `reporter = <email>`.
+- **Mentioned** — a **best-effort full-text proxy**, `text ~ "<accountId>"`. Jira
+  has no exact @mention JQL, so this matches content where the person's
+  accountId appears (i.e. @mentions); it is **not** an exact match.
+
+Details and caveats:
+
+- The person's accountId is derived from the `reporter` field of one of their own
+  created tickets (a single `acli` search with `--limit 1`), so the page needs
+  **no `[jira]` REST credentials**. If the person has created nothing, the
+  accountId can't be resolved and the Mentioned section shows "mentions
+  unavailable" — Created-by still works.
+- Results are **deduplicated by issue key**: a ticket that is both created-by and
+  mentioned appears only under **Created by**.
+- The optional `jira_jql` filter is **AND'd** into both queries, bounding them.
+- The list is **not date-enriched** (cards show "—" for planning dates), keeping
+  the on-demand fetch fast.
+- Only preconfigured people can be queried — the endpoint rejects any `user` not
+  in `[jira_people]`.
+
+This reuses the **same** `[jira_people]` list already used for the board-stream
+merge (see [Jira Data Fetching](#jira-data-fetching)); that board behavior is
+unchanged. A companion endpoint, `GET /api/people`, returns the configured
+`[jira_people]` emails and powers the dropdown.
 
 ## Backend Commands
 
@@ -358,20 +475,42 @@ Implemented now:
 
 - backend config loading from `~/.config/quasar/config.toml`
 - GitHub fan-out across multiple configured repositories
+- Jira per-project fan-out plus an optional `[jira_people]` cross-project query
+  (assignee OR reporter across all projects), merged with the board results and
+  de-duplicated by issue key
+- configurable `jira_base_url` for Jira browse links (default
+  `https://quera.atlassian.net`)
 - fixture-backed and CLI-backed adapter paths for GitHub and Jira
-- short-lived in-memory caching for API responses
+- short-lived in-memory caching for API responses (`cache_ttl_secs`, default 30s)
+- an in-memory per-issue Jira planning-date cache (from `acli workitem view`),
+  keyed by issue key with a configurable TTL (`jira_date_cache_ttl_secs`,
+  default 600s); only cache misses/expired entries are re-fetched on refresh,
+  and editing a Jira date invalidates that issue's entry immediately
+- concurrent GitHub + Jira source fetching, each streamed to the UI as it
+  completes, so a cold refresh runs about as long as the slowest single source
 - unified work-item rendering with explicit repo metadata in the payload
+- work items carrying a list of assignees (multiple on GitHub, 0 or 1 on Jira),
+  shown as stacked avatars on cards and the timeline
 - summary cards, status chart, recent activity panel, and tests
-- source-aware container, source, status, and assignee filters in the frontend
+- source-aware container and source filters plus multi-select status and
+  assignee filters in the frontend
 - item detail overlay with lazily-fetched body, comments, and metadata
 - inline editing of GitHub start/target dates and board Status
+- inline editing of assignees (GitHub multi-select, Jira single-select)
+- a **People** tab that lazily fetches a configured person's Jira tickets on
+  demand (created-by, plus a best-effort full-text "mentioned" proxy), needing
+  no `[jira]` credentials
 
 The second filter is **source-aware**: with Source = GitHub it lists
 repositories, with Source = Jira it lists projects, and with Source = All it
 shows a combined list (Jira entries hinted). Its options are drawn from each
 item's `container` (GitHub `owner/repo` or Jira project key), and the dashboard
 cards/list update against the active container, source, status, and assignee
-selections.
+selections. The container and source filters are single-select, while the
+**status** and **assignee** filters (shared by the board and timeline views) are
+**multi-select** — a checkbox dropdown where selecting several values matches
+items with **any** of them (OR). The assignee dropdown also carries an
+"Unassigned" entry that matches items with no assignee.
 
 ## Launch Locally
 

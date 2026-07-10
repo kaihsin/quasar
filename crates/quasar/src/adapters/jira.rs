@@ -2,18 +2,16 @@ use std::fs;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
+use std::time::Instant;
 
 use serde::Deserialize;
 
+use crate::cache::{CacheOutcome, ResponseCache};
 use crate::clients::command_runner::CommandRunner;
 use crate::config::JiraConfig;
 use crate::domain::{Comment, WorkItem, WorkItemDetail, WorkSource};
 
 type AdapterResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
-
-/// Base URL for constructing browser-facing work item links. `acli` only reports
-/// the internal REST `self` URL, so we build the public `/browse/KEY` link here.
-const JIRA_BROWSE_BASE: &str = "https://quera.atlassian.net/browse";
 
 /// Planning-date custom fields on this Jira site's board:
 /// `customfield_10022` = "Target start", `customfield_10023` = "Target end".
@@ -22,7 +20,15 @@ const JIRA_TARGET_START_FIELD: &str = "customfield_10022";
 const JIRA_TARGET_END_FIELD: &str = "customfield_10023";
 
 /// Max concurrent `acli workitem view` processes when enriching planning dates.
-const ENRICH_CONCURRENCY: usize = 8;
+const ENRICH_CONCURRENCY: usize = 12;
+
+/// Cached planning dates for one issue, stored in the TTL date cache so future
+/// refreshes can skip the per-issue `view` until the entry expires.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct CachedDates {
+    start: String,
+    target: String,
+}
 
 // `acli jira workitem search --json` returns Jira's native nested shape:
 // `{ "key": "SSW-1", "fields": { "summary": ..., "status": { "name": ... }, ... } }`.
@@ -58,6 +64,8 @@ struct JiraStatus {
 struct JiraPerson {
     #[serde(rename = "displayName")]
     display_name: String,
+    #[serde(default, rename = "accountId")]
+    account_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -65,14 +73,17 @@ struct JiraPriority {
     name: String,
 }
 
-pub fn load_fixture_work_items(path: &Path) -> AdapterResult<Vec<WorkItem>> {
+pub fn load_fixture_work_items(path: &Path, base_url: &str) -> AdapterResult<Vec<WorkItem>> {
     let raw = fs::read_to_string(path)?;
-    normalize_work_items(&raw)
+    normalize_work_items(&raw, base_url)
 }
 
-pub fn load_work_items_with_runner(
+/// Search + normalize only (no per-issue date enrichment). Used by the People
+/// page, where the result set can be large and dates aren't needed.
+pub fn search_work_items(
     runner: &dyn CommandRunner,
     jql: &str,
+    base_url: &str,
 ) -> AdapterResult<Vec<WorkItem>> {
     let raw = runner
         .run(
@@ -93,9 +104,56 @@ pub fn load_work_items_with_runner(
         )
         .map_err(|error| -> Box<dyn std::error::Error + Send + Sync> { Box::new(error) })?;
 
-    let mut items = normalize_work_items(&raw)?;
-    enrich_planning_dates(runner, &mut items);
+    normalize_work_items(&raw, base_url)
+}
+
+pub fn load_work_items_with_runner(
+    runner: &dyn CommandRunner,
+    jql: &str,
+    base_url: &str,
+    date_cache: &ResponseCache,
+    now: Instant,
+) -> AdapterResult<Vec<WorkItem>> {
+    let mut items = search_work_items(runner, jql, base_url)?;
+    enrich_planning_dates(runner, &mut items, date_cache, now);
     Ok(items)
+}
+
+/// Best-effort: resolve a person's `(accountId, displayName)` from the reporter
+/// field of one of their created tickets (a single `--limit 1` search). `None`
+/// if they've created nothing or on any failure. Avoids needing `[jira]` creds.
+pub fn fetch_account_id_via_reporter(
+    runner: &dyn CommandRunner,
+    email: &str,
+) -> Option<(String, String)> {
+    let jql = format!("reporter = \"{email}\"");
+    let raw = runner
+        .run(
+            "acli",
+            &[
+                "jira", "workitem", "search", "--jql", &jql, "--fields", "key,reporter",
+                "--limit", "1", "--json",
+            ],
+        )
+        .ok()?;
+    #[derive(Deserialize)]
+    struct Issue {
+        fields: IssueFields,
+    }
+    #[derive(Deserialize)]
+    struct IssueFields {
+        reporter: Option<Reporter>,
+    }
+    #[derive(Deserialize)]
+    struct Reporter {
+        #[serde(rename = "accountId")]
+        account_id: String,
+        #[serde(rename = "displayName")]
+        display_name: String,
+    }
+    let issues: Vec<Issue> = serde_json::from_str(&raw).ok()?;
+    let reporter = issues.into_iter().next()?.fields.reporter?;
+    Some((reporter.account_id, reporter.display_name))
 }
 
 // `acli jira workitem view KEY --json` returns a single nested issue object;
@@ -185,12 +243,35 @@ fn extract_text(value: &serde_json::Value) -> String {
 /// Best-effort: populate `start_date`/`target_date` on each item by fetching the
 /// per-issue `view` (bulk `search` cannot return date fields). Runs the `view`
 /// calls with bounded concurrency; any failed lookup simply leaves dates empty.
-fn enrich_planning_dates(runner: &dyn CommandRunner, items: &mut [WorkItem]) {
-    let keys: Vec<String> = items.iter().map(|item| item.external_id.clone()).collect();
-    if keys.is_empty() {
+fn enrich_planning_dates(
+    runner: &dyn CommandRunner,
+    items: &mut [WorkItem],
+    date_cache: &ResponseCache,
+    now: Instant,
+) {
+    // Apply cache hits in place; collect the indices that still need a `view`.
+    let mut to_fetch: Vec<usize> = Vec::new();
+    for (idx, item) in items.iter_mut().enumerate() {
+        let cache_key = format!("jira-dates:{}", item.external_id);
+        match date_cache.get(&cache_key, now) {
+            CacheOutcome::Hit(payload) => match serde_json::from_str::<CachedDates>(&payload) {
+                Ok(dates) => {
+                    item.start_date = dates.start;
+                    item.target_date = dates.target;
+                }
+                Err(_) => to_fetch.push(idx),
+            },
+            CacheOutcome::Miss => to_fetch.push(idx),
+        }
+    }
+    if to_fetch.is_empty() {
         return;
     }
 
+    let keys: Vec<(usize, String)> = to_fetch
+        .iter()
+        .map(|&idx| (idx, items[idx].external_id.clone()))
+        .collect();
     let next = AtomicUsize::new(0);
     let collected: Mutex<Vec<(usize, String, String)>> = Mutex::new(Vec::new());
     let workers = keys.len().min(ENRICH_CONCURRENCY).max(1);
@@ -199,25 +280,33 @@ fn enrich_planning_dates(runner: &dyn CommandRunner, items: &mut [WorkItem]) {
         for _ in 0..workers {
             scope.spawn(|| loop {
                 let index = next.fetch_add(1, Ordering::Relaxed);
-                let Some(key) = keys.get(index) else {
+                let Some((item_idx, key)) = keys.get(index) else {
                     break;
                 };
                 if let Some((start, target)) = fetch_issue_dates(runner, key) {
                     collected
                         .lock()
                         .expect("enrich collected mutex should not be poisoned")
-                        .push((index, start, target));
+                        .push((*item_idx, start, target));
                 }
             });
         }
     });
 
-    for (index, start, target) in collected
+    for (idx, start, target) in collected
         .into_inner()
         .expect("enrich collected mutex should not be poisoned")
     {
-        items[index].start_date = start;
-        items[index].target_date = target;
+        // Cache the result (including the empty/no-date case) so future refreshes
+        // skip the `view` for this issue until the TTL elapses.
+        if let Ok(payload) = serde_json::to_string(&CachedDates {
+            start: start.clone(),
+            target: target.clone(),
+        }) {
+            date_cache.insert(&format!("jira-dates:{}", items[idx].external_id), payload, now);
+        }
+        items[idx].start_date = start;
+        items[idx].target_date = target;
     }
 }
 
@@ -240,12 +329,16 @@ fn fetch_issue_dates(runner: &dyn CommandRunner, key: &str) -> Option<(String, S
     ))
 }
 
-pub fn load_fixture_issue_detail(path: &Path) -> AdapterResult<WorkItemDetail> {
+pub fn load_fixture_issue_detail(path: &Path, base_url: &str) -> AdapterResult<WorkItemDetail> {
     let raw = fs::read_to_string(path)?;
-    normalize_issue_detail(&raw)
+    normalize_issue_detail(&raw, base_url)
 }
 
-pub fn fetch_issue_detail(runner: &dyn CommandRunner, key: &str) -> AdapterResult<WorkItemDetail> {
+pub fn fetch_issue_detail(
+    runner: &dyn CommandRunner,
+    key: &str,
+    base_url: &str,
+) -> AdapterResult<WorkItemDetail> {
     let raw = runner
         .run(
             "acli",
@@ -261,14 +354,14 @@ pub fn fetch_issue_detail(runner: &dyn CommandRunner, key: &str) -> AdapterResul
         )
         .map_err(|error| -> Box<dyn std::error::Error + Send + Sync> { Box::new(error) })?;
 
-    normalize_issue_detail(&raw)
+    normalize_issue_detail(&raw, base_url)
 }
 
-fn normalize_issue_detail(raw: &str) -> AdapterResult<WorkItemDetail> {
+fn normalize_issue_detail(raw: &str, base_url: &str) -> AdapterResult<WorkItemDetail> {
     let issue: JiraDetailIssue = serde_json::from_str(raw)?;
     let fields = issue.fields;
     let external_id = issue.key;
-    let url = format!("{JIRA_BROWSE_BASE}/{external_id}");
+    let url = format!("{}/browse/{external_id}", base_url.trim_end_matches('/'));
     let container = external_id
         .split_once('-')
         .map(|(project_key, _)| project_key.to_string())
@@ -291,6 +384,15 @@ fn normalize_issue_detail(raw: &str) -> AdapterResult<WorkItemDetail> {
         })
         .collect();
 
+    // Capture the current assignee's accountId (the write id) before `assignee`
+    // is consumed below to build the display-name `assignees` list.
+    let assignee_selected: Vec<String> = fields
+        .assignee
+        .as_ref()
+        .and_then(|p| p.account_id.clone())
+        .into_iter()
+        .collect();
+
     let item = WorkItem {
         source: WorkSource::Jira,
         id: format!("jira:{external_id}"),
@@ -299,7 +401,7 @@ fn normalize_issue_detail(raw: &str) -> AdapterResult<WorkItemDetail> {
         title: fields.summary,
         url,
         status: fields.status.name,
-        assignee: fields.assignee.map(|person| person.display_name),
+        assignees: fields.assignee.map(|person| person.display_name).into_iter().collect(),
         labels: fields.labels,
         priority: fields.priority.map(|priority| priority.name),
         created_at: fields.created.unwrap_or_default(),
@@ -317,17 +419,22 @@ fn normalize_issue_detail(raw: &str) -> AdapterResult<WorkItemDetail> {
         comments,
         project_status: None,
         status_options: Vec::new(),
+        assignee_options: Vec::new(),
+        assignee_selected,
     })
 }
 
-fn normalize_work_items(raw: &str) -> AdapterResult<Vec<WorkItem>> {
+fn normalize_work_items(raw: &str, base_url: &str) -> AdapterResult<Vec<WorkItem>> {
     let issues: Vec<JiraIssue> = serde_json::from_str(raw)?;
-    Ok(issues.into_iter().map(normalize_issue).collect())
+    Ok(issues
+        .into_iter()
+        .map(|issue| normalize_issue(issue, base_url))
+        .collect())
 }
 
-fn normalize_issue(issue: JiraIssue) -> WorkItem {
+fn normalize_issue(issue: JiraIssue, base_url: &str) -> WorkItem {
     let external_id = issue.key;
-    let url = format!("{JIRA_BROWSE_BASE}/{external_id}");
+    let url = format!("{}/browse/{external_id}", base_url.trim_end_matches('/'));
     // Project key is the prefix of the issue key (e.g. "SSW" from "SSW-1131");
     // `search` does not return the project object.
     let container = external_id
@@ -344,7 +451,7 @@ fn normalize_issue(issue: JiraIssue) -> WorkItem {
         title: fields.summary,
         url,
         status: fields.status.name,
-        assignee: fields.assignee.map(|person| person.display_name),
+        assignees: fields.assignee.map(|person| person.display_name).into_iter().collect(),
         labels: fields.labels,
         priority: fields.priority.map(|priority| priority.name),
         created_at: fields.created.unwrap_or_default(),
@@ -507,13 +614,64 @@ pub fn fetch_status_options(
         .collect()
 }
 
+/// Best-effort: users assignable to `key` (accountId + displayName). Empty on failure.
+pub fn fetch_assignable_users(
+    runner: &dyn CommandRunner,
+    config: &JiraConfig,
+    key: &str,
+) -> Vec<crate::domain::AssigneeOption> {
+    let url = format!(
+        "{}/rest/api/3/user/assignable/search?issueKey={}",
+        config.base_url.trim_end_matches('/'),
+        key
+    );
+    let Ok(raw) = jira_curl(runner, config, "GET", &url, None) else {
+        return Vec::new();
+    };
+    #[derive(Deserialize)]
+    struct User {
+        #[serde(rename = "accountId")]
+        account_id: String,
+        #[serde(rename = "displayName")]
+        display_name: String,
+    }
+    serde_json::from_str::<Vec<User>>(&raw)
+        .map(|users| {
+            users
+                .into_iter()
+                .map(|u| crate::domain::AssigneeOption { id: u.account_id, name: u.display_name })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Set (or clear when None) a Jira issue's single assignee via REST PUT.
+pub fn set_assignee(
+    runner: &dyn CommandRunner,
+    config: &JiraConfig,
+    key: &str,
+    account_id: Option<&str>,
+) -> AdapterResult<()> {
+    let value = match account_id {
+        Some(id) => serde_json::json!({ "accountId": id }),
+        None => serde_json::Value::Null,
+    };
+    let body = serde_json::json!({ "fields": { "assignee": value } }).to_string();
+    jira_curl(runner, config, "PUT", &issue_url(config, key), Some(&body))?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
+    use std::time::{Duration, Instant};
     use std::{path::PathBuf, sync::Mutex};
 
+    use crate::cache::ResponseCache;
     use crate::clients::command_runner::{CommandResult, CommandRunner, CommandRunnerError};
 
     use super::{load_fixture_work_items, load_work_items_with_runner};
+
+    const TEST_BASE: &str = "https://quera.atlassian.net";
 
     struct MockCommandRunner {
         calls: Mutex<Vec<(String, Vec<String>)>>,
@@ -567,7 +725,7 @@ mod tests {
 
     #[test]
     fn jira_fixture_detail_normalizes_body_and_comments() {
-        let detail = super::load_fixture_issue_detail(&detail_fixture_path())
+        let detail = super::load_fixture_issue_detail(&detail_fixture_path(), TEST_BASE)
             .expect("detail fixture should load");
 
         assert_eq!(detail.item.id, "jira:ABC-42");
@@ -588,7 +746,8 @@ mod tests {
         let payload = std::fs::read_to_string(detail_fixture_path()).expect("fixture should read");
         let runner = MockCommandRunner::success(&payload);
 
-        let detail = super::fetch_issue_detail(&runner, "ABC-42").expect("detail should load");
+        let detail =
+            super::fetch_issue_detail(&runner, "ABC-42", TEST_BASE).expect("detail should load");
 
         let calls = runner
             .calls
@@ -639,7 +798,7 @@ mod tests {
 
     #[test]
     fn jira_fixture_normalizes_into_work_items() {
-        let items = load_fixture_work_items(&fixture_path()).expect("fixture should load");
+        let items = load_fixture_work_items(&fixture_path(), TEST_BASE).expect("fixture should load");
 
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].id, "jira:ABC-42");
@@ -648,7 +807,7 @@ mod tests {
         assert_eq!(items[0].container, "ABC");
         assert_eq!(items[0].url, "https://quera.atlassian.net/browse/ABC-42");
         assert_eq!(items[0].status, "In Progress");
-        assert_eq!(items[0].assignee.as_deref(), Some("Kai Hsin Wu"));
+        assert_eq!(items[0].assignees, vec!["Kai Hsin Wu".to_string()]);
     }
 
     #[test]
@@ -656,8 +815,14 @@ mod tests {
         let payload = std::fs::read_to_string(fixture_path()).expect("fixture should read");
         let runner = MockCommandRunner::success(&payload);
 
-        let items = load_work_items_with_runner(&runner, "order by updated desc")
-            .expect("runner payload should load");
+        let items = load_work_items_with_runner(
+            &runner,
+            "order by updated desc",
+            TEST_BASE,
+            &ResponseCache::new(Duration::from_secs(600)),
+            Instant::now(),
+        )
+        .expect("runner payload should load");
 
         let calls = runner
             .calls
@@ -696,6 +861,85 @@ mod tests {
     }
 
     #[test]
+    fn search_work_items_normalizes_without_enrichment() {
+        let payload = std::fs::read_to_string(fixture_path()).expect("fixture");
+        let runner = MockCommandRunner::success(&payload);
+        let items = super::search_work_items(&runner, "reporter = \"a@x\"", TEST_BASE)
+            .expect("search should normalize");
+        assert_eq!(items.len(), 1);
+        // Only the search call — no per-issue `view` enrichment calls.
+        assert_eq!(runner.calls.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn enrichment_skips_view_on_date_cache_hit() {
+        let payload = std::fs::read_to_string(fixture_path()).expect("fixture");
+        let runner = MockCommandRunner::success(&payload);
+        let cache = ResponseCache::new(Duration::from_secs(600));
+        let now = Instant::now();
+        cache.insert(
+            "jira-dates:ABC-42",
+            r#"{"start":"2026-06-01","target":"2026-06-15"}"#.to_string(),
+            now,
+        );
+        let items = super::load_work_items_with_runner(
+            &runner, "order by updated desc", TEST_BASE, &cache, now,
+        )
+        .expect("load");
+        assert_eq!(items[0].start_date, "2026-06-01");
+        assert_eq!(items[0].target_date, "2026-06-15");
+        // Only the search call — the per-issue `view` was skipped by the cache hit.
+        assert_eq!(runner.calls.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn enrichment_populates_date_cache_on_miss() {
+        struct RoutingRunner {
+            issues: String,
+        }
+        impl CommandRunner for RoutingRunner {
+            fn run(&self, _p: &str, args: &[&str]) -> CommandResult<String> {
+                if args.contains(&"view") {
+                    Ok(r#"{"key":"ABC-42","fields":{"customfield_10022":"2026-07-01","customfield_10023":"2026-07-20"}}"#.to_string())
+                } else {
+                    Ok(self.issues.clone())
+                }
+            }
+        }
+        let runner = RoutingRunner {
+            issues: std::fs::read_to_string(fixture_path()).expect("fixture"),
+        };
+        let cache = ResponseCache::new(Duration::from_secs(600));
+        let now = Instant::now();
+        let items = super::load_work_items_with_runner(
+            &runner, "order by updated desc", TEST_BASE, &cache, now,
+        )
+        .expect("load");
+        assert_eq!(items[0].start_date, "2026-07-01");
+        assert_eq!(
+            cache.get("jira-dates:ABC-42", now),
+            crate::cache::CacheOutcome::Hit(
+                r#"{"start":"2026-07-01","target":"2026-07-20"}"#.to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn fetch_account_id_via_reporter_parses_account() {
+        let payload =
+            r#"[{"key":"X-1","fields":{"reporter":{"accountId":"acc:1","displayName":"Ann"}}}]"#;
+        let runner = MockCommandRunner::success(payload);
+        let got = super::fetch_account_id_via_reporter(&runner, "a@x");
+        assert_eq!(got, Some(("acc:1".to_string(), "Ann".to_string())));
+    }
+
+    #[test]
+    fn fetch_account_id_via_reporter_none_when_empty() {
+        let runner = MockCommandRunner::success("[]");
+        assert_eq!(super::fetch_account_id_via_reporter(&runner, "a@x"), None);
+    }
+
+    #[test]
     fn jira_enrichment_populates_planning_dates() {
         // Returns the search array for the `search` call and a single view object
         // (with dates) for the `view` call, keyed off the args.
@@ -720,8 +964,14 @@ mod tests {
                 .to_string(),
         };
 
-        let items = load_work_items_with_runner(&runner, "order by updated desc")
-            .expect("runner payload should load");
+        let items = load_work_items_with_runner(
+            &runner,
+            "order by updated desc",
+            TEST_BASE,
+            &ResponseCache::new(Duration::from_secs(600)),
+            Instant::now(),
+        )
+        .expect("runner payload should load");
 
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].start_date, "2026-07-01");
@@ -732,10 +982,23 @@ mod tests {
     fn jira_runner_propagates_cli_failures() {
         let runner = MockCommandRunner::failure("jira unavailable");
 
-        let error = load_work_items_with_runner(&runner, "order by updated desc")
-            .expect_err("runner should fail");
+        let error = load_work_items_with_runner(
+            &runner,
+            "order by updated desc",
+            TEST_BASE,
+            &ResponseCache::new(Duration::from_secs(600)),
+            Instant::now(),
+        )
+        .expect_err("runner should fail");
 
         assert!(error.to_string().contains("jira unavailable"));
+    }
+
+    #[test]
+    fn jira_browse_url_uses_provided_base() {
+        let items = load_fixture_work_items(&fixture_path(), "https://acme.atlassian.net/")
+            .expect("fixture should load");
+        assert_eq!(items[0].url, "https://acme.atlassian.net/browse/ABC-42");
     }
 
     fn test_jira_config() -> crate::config::JiraConfig {
@@ -858,5 +1121,46 @@ mod tests {
         let runner = MockCommandRunner::failure("boom");
         let options = super::fetch_status_options(&runner, &test_jira_config(), "SSW-1");
         assert!(options.is_empty());
+    }
+
+    #[test]
+    fn fetch_assignable_users_parses_options() {
+        let runner = MockCommandRunner::success(r#"[{"accountId":"a1","displayName":"Alice"}]"#);
+        let options = super::fetch_assignable_users(&runner, &test_jira_config(), "SSW-1");
+        assert_eq!(options.len(), 1);
+        assert_eq!(options[0].id, "a1");
+        assert_eq!(options[0].name, "Alice");
+    }
+
+    #[test]
+    fn set_assignee_puts_accountid() {
+        let runner = MockCommandRunner::success("");
+        super::set_assignee(&runner, &test_jira_config(), "SSW-1", Some("a1"))
+            .expect("assignee write should succeed");
+
+        let calls = runner.calls.lock().expect("calls mutex");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "curl");
+        let args = &calls[0].1;
+        assert!(args.contains(&"PUT".to_string()));
+        assert!(args
+            .iter()
+            .any(|arg| arg == "https://example.atlassian.net/rest/api/3/issue/SSW-1"));
+        assert!(args
+            .iter()
+            .any(|arg| arg.contains("accountId") && arg.contains("a1")));
+    }
+
+    #[test]
+    fn set_assignee_clears_with_null() {
+        let runner = MockCommandRunner::success("");
+        super::set_assignee(&runner, &test_jira_config(), "SSW-1", None)
+            .expect("clear should succeed");
+
+        let calls = runner.calls.lock().expect("calls mutex");
+        let args = &calls[0].1;
+        assert!(args
+            .iter()
+            .any(|arg| arg.contains("\"assignee\":null")));
     }
 }

@@ -17,7 +17,7 @@ const detail: WorkItemDetail = {
     title: "Investigate sync gap",
     url: "https://example.com/issues/123",
     status: "open",
-    assignee: "kai",
+    assignees: ["kai"],
     labels: ["bug"],
     priority: null,
     created_at: "2026-07-06T10:00:00Z",
@@ -33,6 +33,8 @@ const detail: WorkItemDetail = {
   comments: [{ author: "kai", created_at: "2026-07-06T12:00:00Z", body: "I can repro." }],
   project_status: "Todo",
   status_options: ["Todo", "In Progress", "Done"],
+  assignee_options: [],
+  assignee_selected: [],
 };
 
 test("fetches and renders body, comments, and sidebar; calls onClose", async () => {
@@ -268,6 +270,73 @@ test("board status baseline advances after a save", async () => {
     expect(updateSpy).toHaveBeenCalledWith("github:openai/quasar#123", "status", "Todo", expect.anything()),
   );
   expect(updateSpy).toHaveBeenCalledTimes(2);
+});
+
+test("github renders assignee checkboxes and saves toggles", async () => {
+  jest.spyOn(api, "fetchWorkItemDetail").mockResolvedValue({
+    ...detail,
+    assignee_options: [
+      { id: "alice", name: "alice" },
+      { id: "bob", name: "bob" },
+    ],
+    assignee_selected: ["alice"],
+  });
+  const updateSpy = jest
+    .spyOn(api, "updateWorkItemAssignees")
+    .mockResolvedValue(undefined);
+
+  render(<ItemDetailModal itemId="github:openai/quasar#123" onClose={() => {}} />);
+
+  await waitFor(() => expect(screen.getByText("Investigate sync gap")).not.toBeNull());
+
+  const alice = screen.getByLabelText("alice") as HTMLInputElement;
+  const bob = screen.getByLabelText("bob") as HTMLInputElement;
+  expect(alice.checked).toBe(true);
+  expect(bob.checked).toBe(false);
+
+  fireEvent.click(bob);
+
+  await waitFor(() =>
+    expect(updateSpy).toHaveBeenCalledWith(
+      "github:openai/quasar#123",
+      ["alice", "bob"],
+      expect.anything(),
+    ),
+  );
+});
+
+test("rapid github toggles compute from optimistic state and don't drop changes", async () => {
+  jest.spyOn(api, "fetchWorkItemDetail").mockResolvedValue({
+    ...detail,
+    assignee_options: [
+      { id: "alice", name: "alice" },
+      { id: "bob", name: "bob" },
+      { id: "carol", name: "carol" },
+    ],
+    assignee_selected: ["alice"],
+  });
+  // Keep the first save's promise pending so the second toggle fires before it
+  // resolves; this proves `next` is computed from the optimistic selection.
+  const updateSpy = jest
+    .spyOn(api, "updateWorkItemAssignees")
+    .mockImplementation(() => new Promise<void>(() => {}));
+
+  render(<ItemDetailModal itemId="github:openai/quasar#123" onClose={() => {}} />);
+
+  await waitFor(() => expect(screen.getByText("Investigate sync gap")).not.toBeNull());
+
+  fireEvent.click(screen.getByLabelText("bob"));
+  fireEvent.click(screen.getByLabelText("carol"));
+
+  await waitFor(() =>
+    expect(updateSpy).toHaveBeenLastCalledWith(
+      "github:openai/quasar#123",
+      ["alice", "bob", "carol"],
+      expect.anything(),
+    ),
+  );
+  expect((screen.getByLabelText("bob") as HTMLInputElement).checked).toBe(true);
+  expect((screen.getByLabelText("carol") as HTMLInputElement).checked).toBe(true);
 });
 
 test("jira renders no board status control", async () => {

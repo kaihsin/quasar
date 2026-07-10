@@ -43,20 +43,29 @@ pub struct AppState {
     pub github_source: GitHubSource,
     pub jira_source: JiraSource,
     pub cache: Arc<ResponseCache>,
+    pub date_cache: Arc<ResponseCache>,
     pub runner: Arc<dyn CommandRunner>,
     pub github_repos: Vec<String>,
     pub jira_queries: Vec<String>,
+    pub jira_base_url: String,
+    pub jira_people: Vec<String>,
+    pub jira_jql: Option<String>,
     pub github_project: Option<GitHubProject>,
     pub jira_config: Option<JiraConfig>,
 }
 
 impl AppState {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         github_source: GitHubSource,
         jira_source: JiraSource,
         cache_ttl_secs: u64,
+        jira_date_cache_ttl_secs: u64,
         github_repos: Vec<String>,
         jira_queries: Vec<String>,
+        jira_base_url: String,
+        jira_people: Vec<String>,
+        jira_jql: Option<String>,
         github_project: Option<GitHubProject>,
         jira_config: Option<JiraConfig>,
     ) -> Self {
@@ -66,9 +75,15 @@ impl AppState {
             cache: Arc::new(ResponseCache::new(std::time::Duration::from_secs(
                 cache_ttl_secs,
             ))),
+            date_cache: Arc::new(ResponseCache::new(std::time::Duration::from_secs(
+                jira_date_cache_ttl_secs,
+            ))),
             runner: Arc::new(SystemCommandRunner),
             github_repos,
             jira_queries,
+            jira_base_url,
+            jira_people,
+            jira_jql,
             github_project,
             jira_config,
         }
@@ -89,6 +104,9 @@ pub fn router(state: AppState) -> Router {
         .route("/api/activity", get(activity))
         .route("/api/work-item-detail", get(work_item_detail))
         .route("/api/work-item-field", patch(update_work_item_field))
+        .route("/api/work-item-assignees", patch(update_work_item_assignees))
+        .route("/api/people", get(people))
+        .route("/api/person-work-items", get(person_work_items))
         .with_state(state)
 }
 
@@ -217,6 +235,14 @@ fn fetch_work_item_detail(state: &AppState, id: &str) -> Result<WorkItemDetail, 
                     detail.project_status = fields.project_status;
                     detail.status_options = fields.status_options;
                 }
+                detail.assignee_options =
+                    adapters::github::fetch_assignable_users(state.runner.as_ref(), repo)
+                        .into_iter()
+                        .map(|login| crate::domain::AssigneeOption {
+                            id: login.clone(),
+                            name: login,
+                        })
+                        .collect();
                 Ok(detail)
             }
         };
@@ -236,11 +262,11 @@ fn fetch_work_item_detail(state: &AppState, id: &str) -> Result<WorkItemDetail, 
         let result = match &state.jira_source {
             JiraSource::Fixture(path) => {
                 let detail_path = path.with_file_name("issue-detail.json");
-                adapters::jira::load_fixture_issue_detail(&detail_path)
+                adapters::jira::load_fixture_issue_detail(&detail_path, &state.jira_base_url)
             }
             JiraSource::Cli => {
                 let mut detail =
-                    match adapters::jira::fetch_issue_detail(state.runner.as_ref(), key) {
+                    match adapters::jira::fetch_issue_detail(state.runner.as_ref(), key, &state.jira_base_url) {
                         Ok(detail) => detail,
                         Err(error) => {
                             return Err(DetailError {
@@ -260,6 +286,8 @@ fn fetch_work_item_detail(state: &AppState, id: &str) -> Result<WorkItemDetail, 
                     }
                     detail.project_status = Some(detail.item.status.clone());
                     detail.status_options = options;
+                    detail.assignee_options =
+                        adapters::jira::fetch_assignable_users(state.runner.as_ref(), jira, key);
                 }
                 Ok(detail)
             }
@@ -455,7 +483,196 @@ fn update_jira_field(
     })?;
 
     state.cache.invalidate("work-items");
+    if matches!(field, "start" | "target") {
+        state.date_cache.invalidate(&format!("jira-dates:{key}"));
+    }
     Ok(())
+}
+
+#[derive(Deserialize)]
+struct UpdateAssigneesRequest {
+    id: String,
+    #[serde(default)]
+    assignee_ids: Vec<String>,
+}
+
+async fn update_work_item_assignees(
+    State(state): State<AppState>,
+    Json(body): Json<UpdateAssigneesRequest>,
+) -> Result<Json<UpdateDatesResponse>, (StatusCode, String)> {
+    set_work_item_assignees(&state, &body)
+        .map(|_| Json(UpdateDatesResponse { ok: true }))
+        .map_err(|error| (error.status, error.message))
+}
+
+fn set_work_item_assignees(
+    state: &AppState,
+    body: &UpdateAssigneesRequest,
+) -> Result<(), DetailError> {
+    if let Some(key) = body.id.strip_prefix("jira:") {
+        if key.is_empty() {
+            return Err(DetailError {
+                status: StatusCode::BAD_REQUEST,
+                message: "missing Jira issue key".to_string(),
+            });
+        }
+        if body.assignee_ids.len() > 1 {
+            return Err(DetailError {
+                status: StatusCode::BAD_REQUEST,
+                message: "Jira work items allow at most one assignee".to_string(),
+            });
+        }
+        if matches!(state.jira_source, JiraSource::Fixture(_)) {
+            return Err(DetailError {
+                status: StatusCode::CONFLICT,
+                message: "writes unavailable in fixture mode".to_string(),
+            });
+        }
+        let jira = state.jira_config.as_ref().ok_or_else(|| DetailError {
+            status: StatusCode::CONFLICT,
+            message: "no [jira] credentials configured; cannot edit Jira fields".to_string(),
+        })?;
+        adapters::jira::set_assignee(
+            state.runner.as_ref(),
+            jira,
+            key,
+            body.assignee_ids.first().map(String::as_str),
+        )
+        .map_err(|error| DetailError {
+            status: StatusCode::BAD_GATEWAY,
+            message: error.to_string(),
+        })?;
+        state.cache.invalidate("work-items");
+        return Ok(());
+    }
+
+    let rest = body.id.strip_prefix("github:").ok_or_else(|| DetailError {
+        status: StatusCode::BAD_REQUEST,
+        message: format!("unrecognized work-item id: {}", body.id),
+    })?;
+    let (repo, number) = rest.rsplit_once('#').ok_or_else(|| DetailError {
+        status: StatusCode::BAD_REQUEST,
+        message: format!("malformed GitHub id: {}", body.id),
+    })?;
+    if number.is_empty() || !number.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(DetailError {
+            status: StatusCode::BAD_REQUEST,
+            message: "issue number must be numeric".to_string(),
+        });
+    }
+    match &state.github_source {
+        GitHubSource::Fixture(_) => {
+            return Err(DetailError {
+                status: StatusCode::CONFLICT,
+                message: "writes unavailable in fixture mode".to_string(),
+            })
+        }
+        GitHubSource::Cli => {}
+    }
+    adapters::github::set_assignees(state.runner.as_ref(), repo, number, &body.assignee_ids)
+        .map_err(|error| DetailError {
+            status: StatusCode::BAD_GATEWAY,
+            message: error.to_string(),
+        })?;
+    state.cache.invalidate("work-items");
+    Ok(())
+}
+
+#[derive(Serialize)]
+struct PeopleResponse {
+    users: Vec<String>,
+}
+
+async fn people(State(state): State<AppState>) -> Json<PeopleResponse> {
+    Json(PeopleResponse {
+        users: state.jira_people.clone(),
+    })
+}
+
+#[derive(Deserialize)]
+struct PersonQuery {
+    user: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct PersonWorkItemsResponse {
+    user: String,
+    account_id: Option<String>,
+    created_by: Vec<WorkItem>,
+    mentioned: Vec<WorkItem>,
+}
+
+async fn person_work_items(
+    State(state): State<AppState>,
+    Query(query): Query<PersonQuery>,
+) -> Result<Json<PersonWorkItemsResponse>, (StatusCode, String)> {
+    fetch_person_work_items(&state, &query.user)
+        .map(Json)
+        .map_err(|error| (error.status, error.message))
+}
+
+fn fetch_person_work_items(
+    state: &AppState,
+    user: &str,
+) -> Result<PersonWorkItemsResponse, DetailError> {
+    if !state.jira_people.iter().any(|u| u == user) {
+        return Err(DetailError {
+            status: StatusCode::BAD_REQUEST,
+            message: format!("unknown configured person: {user}"),
+        });
+    }
+    if matches!(state.jira_source, JiraSource::Fixture(_)) {
+        return Ok(PersonWorkItemsResponse {
+            user: user.to_string(),
+            account_id: None,
+            created_by: Vec::new(),
+            mentioned: Vec::new(),
+        });
+    }
+
+    let cache_key = format!("person:{user}");
+    let now = Instant::now();
+    if let CacheOutcome::Hit(payload) = state.cache.get(&cache_key, now) {
+        if let Ok(cached) = serde_json::from_str::<PersonWorkItemsResponse>(&payload) {
+            return Ok(cached);
+        }
+    }
+
+    let runner = state.runner.as_ref();
+    let account_id = adapters::jira::fetch_account_id_via_reporter(runner, user).map(|(id, _)| id);
+    let queries = crate::config::compose_person_queries(
+        user,
+        account_id.as_deref(),
+        state.jira_jql.as_deref(),
+    );
+
+    let created_by =
+        adapters::jira::search_work_items(runner, &queries.created_by, &state.jira_base_url)
+            .map_err(|error| DetailError {
+                status: StatusCode::BAD_GATEWAY,
+                message: error.to_string(),
+            })?;
+
+    // Mentioned is best-effort: a failure there must not sink created-by.
+    let mut mentioned = match &queries.mentioned {
+        Some(jql) => adapters::jira::search_work_items(runner, jql, &state.jira_base_url)
+            .unwrap_or_default(),
+        None => Vec::new(),
+    };
+    let created_ids: std::collections::HashSet<&str> =
+        created_by.iter().map(|item| item.id.as_str()).collect();
+    mentioned.retain(|item| !created_ids.contains(item.id.as_str()));
+
+    let response = PersonWorkItemsResponse {
+        user: user.to_string(),
+        account_id,
+        created_by,
+        mentioned,
+    };
+    if let Ok(payload) = serde_json::to_string(&response) {
+        state.cache.insert(&cache_key, payload, now);
+    }
+    Ok(response)
 }
 
 fn is_iso_date(value: &str) -> bool {
@@ -518,108 +735,112 @@ where
         return response;
     }
 
-    // Emits a resolved source's items as their own chunk, then folds them into
-    // the accumulated set for caching and batch callers.
-    fn emit_items<F: FnMut(StreamChunk)>(emit: &mut F, items: Vec<WorkItem>, data: &mut Vec<WorkItem>) {
-        emit(StreamChunk::Items {
-            data: &items,
-            warnings: &[],
-        });
-        data.extend(items);
-    }
-    // Emits a source failure as a warning-only chunk, then records the warning.
-    fn emit_warning<F: FnMut(StreamChunk)>(
-        emit: &mut F,
-        warning: SourceWarning,
-        warnings: &mut Vec<SourceWarning>,
-    ) {
-        emit(StreamChunk::Items {
-            data: &[],
-            warnings: std::slice::from_ref(&warning),
-        });
-        warnings.push(warning);
-    }
-
-    let mut data = Vec::new();
-    let mut warnings = Vec::new();
+    // Each unit resolves one source (a GitHub repo, the GitHub fixture, a Jira
+    // query, or the Jira fixture) and yields its items + warnings. Units run on
+    // scoped threads and stream back over a channel as they finish, so a slow
+    // source (e.g. a large Jira project's date enrichment) no longer blocks the
+    // others. `emit` stays on this thread (so it needn't be Sync).
+    type Unit<'a> = Box<dyn FnOnce() -> (Vec<WorkItem>, Vec<SourceWarning>) + Send + 'a>;
+    let mut units: Vec<Unit> = Vec::new();
 
     match &state.github_source {
-        GitHubSource::Fixture(path) => match adapters::github::load_fixture_work_items(path) {
-            Ok(items) => emit_items(&mut emit, items, &mut data),
-            Err(error) => emit_warning(
-                &mut emit,
-                SourceWarning {
-                    source: WorkSource::GitHub,
-                    message: error.to_string(),
-                },
-                &mut warnings,
-            ),
-        },
+        GitHubSource::Fixture(path) => units.push(Box::new(move || {
+            match adapters::github::load_fixture_work_items(path) {
+                Ok(items) => (items, Vec::new()),
+                Err(error) => (
+                    Vec::new(),
+                    vec![SourceWarning { source: WorkSource::GitHub, message: error.to_string() }],
+                ),
+            }
+        })),
         GitHubSource::Cli => {
             if state.github_repos.is_empty() {
-                emit_warning(
-                    &mut emit,
-                    SourceWarning {
-                        source: WorkSource::GitHub,
-                        message: "No GitHub repos configured for CLI mode".to_string(),
-                    },
-                    &mut warnings,
-                );
+                units.push(Box::new(|| {
+                    (
+                        Vec::new(),
+                        vec![SourceWarning {
+                            source: WorkSource::GitHub,
+                            message: "No GitHub repos configured for CLI mode".to_string(),
+                        }],
+                    )
+                }));
             } else {
                 for repo in &state.github_repos {
-                    match adapters::github::load_work_items_with_runner(
-                        state.runner.as_ref(),
-                        repo,
-                        state.github_project.as_ref(),
-                    ) {
-                        Ok(items) => emit_items(&mut emit, items, &mut data),
-                        Err(error) => emit_warning(
-                            &mut emit,
-                            SourceWarning {
-                                source: WorkSource::GitHub,
-                                message: format!("GitHub repo {repo} failed: {error}"),
-                            },
-                            &mut warnings,
-                        ),
-                    }
+                    units.push(Box::new(move || {
+                        match adapters::github::load_work_items_with_runner(
+                            state.runner.as_ref(),
+                            repo,
+                            state.github_project.as_ref(),
+                        ) {
+                            Ok(items) => (items, Vec::new()),
+                            Err(error) => (
+                                Vec::new(),
+                                vec![SourceWarning {
+                                    source: WorkSource::GitHub,
+                                    message: format!("GitHub repo {repo} failed: {error}"),
+                                }],
+                            ),
+                        }
+                    }));
                 }
             }
         }
     }
 
     match &state.jira_source {
-        JiraSource::Fixture(path) => match adapters::jira::load_fixture_work_items(path) {
-            Ok(items) => emit_items(&mut emit, items, &mut data),
-            Err(error) => emit_warning(
-                &mut emit,
-                SourceWarning {
-                    source: WorkSource::Jira,
-                    message: error.to_string(),
-                },
-                &mut warnings,
-            ),
-        },
-        // One `acli` query per configured Jira project, emitted as its own chunk
-        // so each project streams independently (mirroring the GitHub repo loop).
-        // One project failing surfaces a warning without sinking the others.
+        JiraSource::Fixture(path) => units.push(Box::new(move || {
+            match adapters::jira::load_fixture_work_items(path, &state.jira_base_url) {
+                Ok(items) => (items, Vec::new()),
+                Err(error) => (
+                    Vec::new(),
+                    vec![SourceWarning { source: WorkSource::Jira, message: error.to_string() }],
+                ),
+            }
+        })),
         JiraSource::Cli => {
             for jql in &state.jira_queries {
-                match adapters::jira::load_work_items_with_runner(state.runner.as_ref(), jql) {
-                    Ok(items) => emit_items(&mut emit, items, &mut data),
-                    Err(error) => emit_warning(
-                        &mut emit,
-                        SourceWarning {
-                            source: WorkSource::Jira,
-                            message: error.to_string(),
-                        },
-                        &mut warnings,
-                    ),
-                }
+                units.push(Box::new(move || {
+                    match adapters::jira::load_work_items_with_runner(
+                        state.runner.as_ref(),
+                        jql,
+                        &state.jira_base_url,
+                        state.date_cache.as_ref(),
+                        now,
+                    ) {
+                        Ok(items) => (items, Vec::new()),
+                        Err(error) => (
+                            Vec::new(),
+                            vec![SourceWarning { source: WorkSource::Jira, message: error.to_string() }],
+                        ),
+                    }
+                }));
             }
         }
     }
 
+    let mut data: Vec<WorkItem> = Vec::new();
+    let mut warnings: Vec<SourceWarning> = Vec::new();
+    let (tx, rx) = std::sync::mpsc::channel::<(Vec<WorkItem>, Vec<SourceWarning>)>();
+    std::thread::scope(|scope| {
+        for unit in units {
+            let tx = tx.clone();
+            scope.spawn(move || {
+                let _ = tx.send(unit());
+            });
+        }
+        drop(tx);
+        // Receive each unit's result as it completes and emit its chunk immediately.
+        for (items, warns) in &rx {
+            emit(StreamChunk::Items { data: &items, warnings: &warns });
+            data.extend(items);
+            warnings.extend(warns);
+        }
+    });
+
     data.sort_by(|left, right| left.id.cmp(&right.id));
+    // A ticket can match multiple queries (e.g. a board project and the person
+    // query); collapse duplicates by id (sorted above, so dups are adjacent).
+    data.dedup_by(|a, b| a.id == b.id);
 
     let response = WorkItemsResponse {
         data,
@@ -666,8 +887,9 @@ mod tests {
     use tower::ServiceExt;
 
     use super::{
-        fetch_work_item_field, fetch_work_items, resolve_work_items, router, AppState,
-        GitHubSource, JiraSource, StreamChunk, UpdateFieldRequest,
+        fetch_work_item_field, fetch_work_items, resolve_work_items, router,
+        set_work_item_assignees, AppState, GitHubSource, JiraSource, StreamChunk,
+        UpdateAssigneesRequest, UpdateFieldRequest,
     };
     use crate::{
         cache::{CacheOutcome, ResponseCache},
@@ -726,9 +948,13 @@ mod tests {
             github_source: GitHubSource::Fixture(github_source),
             jira_source: JiraSource::Fixture(jira_source),
             cache: Arc::new(ResponseCache::new(Duration::from_secs(30))),
+            date_cache: Arc::new(ResponseCache::new(std::time::Duration::from_secs(600))),
             runner: Arc::new(crate::clients::command_runner::SystemCommandRunner),
             github_repos: Vec::new(),
             jira_queries: vec!["order by updated desc".to_string()],
+            jira_base_url: "https://quera.atlassian.net".to_string(),
+            jira_people: Vec::new(),
+            jira_jql: None,
             github_project: None,
             jira_config: None,
         }
@@ -956,6 +1182,7 @@ mod tests {
             github_source: GitHubSource::Cli,
             jira_source: JiraSource::Fixture(fixture_path("jira")),
             cache: Arc::new(ResponseCache::new(Duration::from_secs(30))),
+            date_cache: Arc::new(ResponseCache::new(std::time::Duration::from_secs(600))),
             runner: Arc::new(MockCommandRunner::new(HashMap::from([
                 ("openai/quasar".to_string(), Ok(github_payload)),
                 (
@@ -965,6 +1192,9 @@ mod tests {
             ]))),
             github_repos: vec!["openai/quasar".to_string(), "rust-lang/rust".to_string()],
             jira_queries: vec!["order by updated desc".to_string()],
+            jira_base_url: "https://quera.atlassian.net".to_string(),
+            jira_people: Vec::new(),
+            jira_jql: None,
             github_project: None,
             jira_config: None,
         };
@@ -1019,12 +1249,107 @@ mod tests {
             github_source: GitHubSource::Cli,
             jira_source: JiraSource::Cli,
             cache: Arc::new(ResponseCache::new(Duration::from_secs(30))),
+            date_cache: Arc::new(ResponseCache::new(std::time::Duration::from_secs(600))),
             runner: Arc::new(runner),
             github_repos: Vec::new(),
             jira_queries,
+            jira_base_url: "https://quera.atlassian.net".to_string(),
+            jira_people: Vec::new(),
+            jira_jql: None,
             github_project: None,
             jira_config: None,
         }
+    }
+
+    // Mirrors `jira_cli_state` but with `JiraSource::Cli` and configured people,
+    // for exercising the People-page person-work-items path.
+    fn jira_cli_state_people<R: CommandRunner + 'static>(
+        runner: R,
+        people: Vec<String>,
+    ) -> AppState {
+        AppState {
+            github_source: GitHubSource::Cli,
+            jira_source: JiraSource::Cli,
+            cache: Arc::new(ResponseCache::new(Duration::from_secs(30))),
+            date_cache: Arc::new(ResponseCache::new(std::time::Duration::from_secs(600))),
+            runner: Arc::new(runner),
+            github_repos: Vec::new(),
+            jira_queries: Vec::new(),
+            jira_base_url: "https://quera.atlassian.net".to_string(),
+            jira_people: people,
+            jira_jql: None,
+            github_project: None,
+            jira_config: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn people_endpoint_lists_configured_users() {
+        let mut state = app_state(fixture_path("github"), fixture_path("jira"));
+        state.jira_people = vec!["a@x".to_string(), "b@x".to_string()];
+        let app = router(state);
+        let response = app
+            .oneshot(Request::builder().uri("/api/people").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let payload: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(payload["users"][0], "a@x");
+        assert_eq!(payload["users"][1], "b@x");
+    }
+
+    #[test]
+    fn person_work_items_rejects_unconfigured_user() {
+        let mut state = app_state(fixture_path("github"), fixture_path("jira"));
+        state.jira_people = vec!["a@x".to_string()];
+        let error = super::fetch_person_work_items(&state, "stranger@x")
+            .expect_err("unconfigured user should be rejected");
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn person_work_items_fixture_mode_returns_empty() {
+        let mut state = app_state(fixture_path("github"), fixture_path("jira"));
+        state.jira_people = vec!["a@x".to_string()];
+        let result = super::fetch_person_work_items(&state, "a@x").expect("ok");
+        assert!(result.created_by.is_empty() && result.mentioned.is_empty());
+        assert_eq!(result.user, "a@x");
+        assert_eq!(result.account_id, None);
+    }
+
+    #[test]
+    fn person_work_items_dedupes_mentioned_against_created_by() {
+        // Cli runner answering: (a) reporter --limit 1 resolve -> accountId acc:1,
+        // (b) created-by search -> SSW-1, (c) mentioned text~ search -> SSW-1 + SSW-2.
+        // Expect created_by=[SSW-1], mentioned=[SSW-2] (SSW-1 removed as dup).
+        struct Runner;
+        impl CommandRunner for Runner {
+            fn run(&self, _p: &str, args: &[&str]) -> CommandResult<String> {
+                let jql = args
+                    .windows(2)
+                    .find_map(|w| (w[0] == "--jql").then_some(w[1]))
+                    .unwrap_or("");
+                let has_limit = args.iter().any(|a| *a == "--limit");
+                if jql.starts_with("reporter =") && has_limit {
+                    Ok(r#"[{"key":"SSW-1","fields":{"reporter":{"accountId":"acc:1","displayName":"Ann"}}}]"#.to_string())
+                } else if jql.starts_with("reporter =") {
+                    Ok(jira_search_payload("SSW-1", "created"))
+                } else {
+                    // text ~ "acc:1" mentioned search -> two issues
+                    Ok(format!(
+                        r#"[{{"key":"SSW-1","fields":{{"summary":"created","status":{{"name":"To Do"}}}}}},{{"key":"SSW-2","fields":{{"summary":"mention","status":{{"name":"To Do"}}}}}}]"#
+                    ))
+                }
+            }
+        }
+        let state = jira_cli_state_people(Runner, vec!["a@x".to_string()]);
+        let result = super::fetch_person_work_items(&state, "a@x").expect("ok");
+        let created: Vec<&str> = result.created_by.iter().map(|i| i.external_id.as_str()).collect();
+        let mentioned: Vec<&str> = result.mentioned.iter().map(|i| i.external_id.as_str()).collect();
+        assert_eq!(created, vec!["SSW-1"]);
+        assert_eq!(mentioned, vec!["SSW-2"]);
+        assert_eq!(result.account_id.as_deref(), Some("acc:1"));
     }
 
     #[test]
@@ -1093,6 +1418,28 @@ mod tests {
             .collect();
         assert_eq!(jira_warnings.len(), 1);
         assert!(jira_warnings[0].message.contains("acli auth expired"));
+    }
+
+    #[test]
+    fn resolve_work_items_dedupes_items_with_same_id() {
+        let queries = vec![
+            "project = SSW ORDER BY updated DESC".to_string(),
+            "(assignee in (\"a@x\")) ORDER BY updated DESC".to_string(),
+        ];
+        let runner = JiraQueryMock {
+            by_jql: HashMap::from([
+                (queries[0].clone(), Ok(jira_search_payload("SSW-1", "dup"))),
+                (queries[1].clone(), Ok(jira_search_payload("SSW-1", "dup"))),
+            ]),
+        };
+        let state = jira_cli_state(runner, queries);
+        let response = fetch_work_items(&state);
+        let ssw1 = response
+            .data
+            .iter()
+            .filter(|item| item.id == "jira:SSW-1")
+            .count();
+        assert_eq!(ssw1, 1, "duplicate ids should be collapsed");
     }
 
     #[tokio::test]
@@ -1365,12 +1712,16 @@ mod tests {
             github_source: GitHubSource::Cli,
             jira_source: JiraSource::Fixture(fixture_path("jira")),
             cache: Arc::new(ResponseCache::new(Duration::from_secs(30))),
+            date_cache: Arc::new(ResponseCache::new(std::time::Duration::from_secs(600))),
             runner: Arc::new(RoutingRunner {
                 issues: std::fs::read_to_string(fixture_path("github"))
                     .expect("fixture should read"),
             }),
             github_repos: vec!["openai/quasar".to_string()],
             jira_queries: vec!["order by updated desc".to_string()],
+            jira_base_url: "https://quera.atlassian.net".to_string(),
+            jira_people: Vec::new(),
+            jira_jql: None,
             github_project: Some(GitHubProject {
                 owner: "QuEraComputing".into(),
                 number: 18,
@@ -1457,12 +1808,16 @@ mod tests {
             github_source: GitHubSource::Cli,
             jira_source: JiraSource::Fixture(fixture_path("jira")),
             cache: Arc::new(ResponseCache::new(Duration::from_secs(30))),
+            date_cache: Arc::new(ResponseCache::new(std::time::Duration::from_secs(600))),
             runner: Arc::new(RoutingRunner {
                 issues: std::fs::read_to_string(fixture_path("github"))
                     .expect("fixture should read"),
             }),
             github_repos: vec!["openai/quasar".to_string()],
             jira_queries: vec!["order by updated desc".to_string()],
+            jira_base_url: "https://quera.atlassian.net".to_string(),
+            jira_people: Vec::new(),
+            jira_jql: None,
             github_project: Some(GitHubProject {
                 owner: "QuEraComputing".into(),
                 number: 18,
@@ -1507,9 +1862,13 @@ mod tests {
             github_source: GitHubSource::Cli,
             jira_source: JiraSource::Fixture(fixture_path("jira")),
             cache: Arc::new(ResponseCache::new(Duration::from_secs(30))),
+            date_cache: Arc::new(ResponseCache::new(std::time::Duration::from_secs(600))),
             runner: Arc::new(MockCommandRunner::new(HashMap::new())),
             github_repos: Vec::new(),
             jira_queries: vec!["order by updated desc".to_string()],
+            jira_base_url: "https://quera.atlassian.net".to_string(),
+            jira_people: Vec::new(),
+            jira_jql: None,
             github_project: None,
             jira_config: None,
         };
@@ -1544,6 +1903,9 @@ mod tests {
                         .to_string())
                 } else if args.join(" ").contains("issue view") {
                     Ok(r#"{"number":123,"title":"t","url":"https://github.com/o/r/issues/123","state":"OPEN","assignees":[],"labels":[],"createdAt":"2026-01-01T00:00:00Z","updatedAt":"2026-01-01T00:00:00Z","author":{"login":"a"}}"#.to_string())
+                } else if args.iter().any(|a| a.contains("assignees")) {
+                    // `gh api repos/o/r/assignees --paginate`
+                    Ok("[]".to_string())
                 } else {
                     Err(CommandRunnerError::new("unexpected"))
                 }
@@ -1553,9 +1915,13 @@ mod tests {
             github_source: GitHubSource::Cli,
             jira_source: JiraSource::Fixture(fixture_path("jira")),
             cache: Arc::new(ResponseCache::new(Duration::from_secs(30))),
+            date_cache: Arc::new(ResponseCache::new(std::time::Duration::from_secs(600))),
             runner: Arc::new(Runner),
             github_repos: vec!["o/r".to_string()],
             jira_queries: vec!["order by updated desc".to_string()],
+            jira_base_url: "https://quera.atlassian.net".to_string(),
+            jira_people: Vec::new(),
+            jira_jql: None,
             github_project: Some(GitHubProject {
                 owner: "QuEraComputing".into(),
                 number: 18,
@@ -1602,9 +1968,13 @@ mod tests {
             github_source: GitHubSource::Fixture(fixture_path("github")),
             jira_source: JiraSource::Cli,
             cache: Arc::new(ResponseCache::new(Duration::from_secs(30))),
+            date_cache: Arc::new(ResponseCache::new(std::time::Duration::from_secs(600))),
             runner,
             github_repos: Vec::new(),
             jira_queries: vec!["order by updated desc".to_string()],
+            jira_base_url: "https://quera.atlassian.net".to_string(),
+            jira_people: Vec::new(),
+            jira_jql: None,
             github_project: None,
             jira_config: jira,
         }
@@ -1636,6 +2006,36 @@ mod tests {
         assert_eq!(
             state.cache.get("work-items", Instant::now()),
             CacheOutcome::Miss
+        );
+    }
+
+    #[test]
+    fn jira_date_write_invalidates_date_cache_entry() {
+        let runner = Arc::new(JiraWriteRunner {
+            calls: Mutex::new(Vec::new()),
+        });
+        let state = jira_write_state(runner, Some(test_jira_config()));
+        let now = Instant::now();
+        state.date_cache.insert(
+            "jira-dates:SSW-1",
+            r#"{"start":"x","target":"y"}"#.to_string(),
+            now,
+        );
+
+        fetch_work_item_field(
+            &state,
+            &UpdateFieldRequest {
+                id: "jira:SSW-1".to_string(),
+                field: "target".to_string(),
+                value: Some("2026-07-20".to_string()),
+            },
+        )
+        .expect("date write should succeed");
+
+        assert_eq!(
+            state.date_cache.get("jira-dates:SSW-1", now),
+            CacheOutcome::Miss,
+            "a date write must invalidate the cached dates for that issue"
         );
     }
 
@@ -1698,5 +2098,131 @@ mod tests {
         )
         .expect_err("empty status should be rejected");
         assert_eq!(error.status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn update_assignees_rejects_fixture_mode() {
+        let app = router(app_state(fixture_path("github"), fixture_path("jira")));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri("/api/work-item-assignees")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"id":"github:openai/quasar#123","assignee_ids":["alice"]}"#,
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn update_assignees_rejects_unknown_id() {
+        let app = router(app_state(fixture_path("github"), fixture_path("jira")));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri("/api/work-item-assignees")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"id":"nonsense","assignee_ids":[]}"#))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn update_jira_assignee_rejects_multiple() {
+        // The >1 check must fire before any CLI call, so an unconfigured runner
+        // (which would error on use) proves no write was attempted.
+        let runner = Arc::new(JiraWriteRunner {
+            calls: Mutex::new(Vec::new()),
+        });
+        let state = jira_write_state(runner.clone(), Some(test_jira_config()));
+
+        let error = set_work_item_assignees(
+            &state,
+            &UpdateAssigneesRequest {
+                id: "jira:SSW-1".to_string(),
+                assignee_ids: vec!["a".to_string(), "b".to_string()],
+            },
+        )
+        .expect_err("multiple jira assignees should be rejected");
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+        assert!(
+            runner.calls.lock().unwrap().is_empty(),
+            "no CLI call should be made before the count check"
+        );
+    }
+
+    #[test]
+    fn update_assignees_github_success_invalidates_work_items_cache() {
+        // Routing runner answers both the CLI-mode work-items population
+        // (`gh issue list`) and the assignee-write sequence
+        // (`gh issue view --json assignees` then `gh issue edit`).
+        struct RoutingRunner {
+            issues: String,
+        }
+        impl CommandRunner for RoutingRunner {
+            fn run(&self, _program: &str, args: &[&str]) -> CommandResult<String> {
+                if args.contains(&"list") {
+                    return Ok(self.issues.clone());
+                }
+                if args.contains(&"view") {
+                    return Ok(r#"{"assignees":[]}"#.to_string());
+                }
+                // `gh issue edit`
+                Ok(String::new())
+            }
+        }
+
+        let state = AppState {
+            github_source: GitHubSource::Cli,
+            jira_source: JiraSource::Fixture(fixture_path("jira")),
+            cache: Arc::new(ResponseCache::new(Duration::from_secs(30))),
+            date_cache: Arc::new(ResponseCache::new(std::time::Duration::from_secs(600))),
+            runner: Arc::new(RoutingRunner {
+                issues: std::fs::read_to_string(fixture_path("github"))
+                    .expect("fixture should read"),
+            }),
+            github_repos: vec!["openai/quasar".to_string()],
+            jira_queries: vec!["order by updated desc".to_string()],
+            jira_base_url: "https://quera.atlassian.net".to_string(),
+            jira_people: Vec::new(),
+            jira_jql: None,
+            github_project: None,
+            jira_config: None,
+        };
+
+        // Populate the cache (miss on first fetch).
+        let populated = fetch_work_items(&state);
+        assert_eq!(populated.cache_status, "miss");
+        assert!(matches!(
+            state.cache.get("work-items", Instant::now()),
+            CacheOutcome::Hit(_)
+        ));
+
+        // A successful assignee write must invalidate the cache.
+        let result = set_work_item_assignees(
+            &state,
+            &UpdateAssigneesRequest {
+                id: "github:openai/quasar#123".to_string(),
+                assignee_ids: vec!["alice".to_string()],
+            },
+        );
+        assert!(
+            result.is_ok(),
+            "expected ok, got status {:?}",
+            result.err().map(|error| error.status)
+        );
+        assert_eq!(
+            state.cache.get("work-items", Instant::now()),
+            CacheOutcome::Miss
+        );
     }
 }

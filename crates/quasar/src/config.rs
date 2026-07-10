@@ -18,6 +18,17 @@ pub struct RuntimeConfig {
     /// One composed JQL query per Jira project (or a single query in the
     /// no-`[jira_board]` escape-hatch case), fetched and streamed independently.
     pub jira_queries: Vec<String>,
+    /// Jira site domain (e.g. `https://quera.atlassian.net`), used to build
+    /// browse links. Defaults to the QuEra site.
+    pub jira_base_url: String,
+    /// Emails from `[jira_people]`, retained for the People page endpoints.
+    pub jira_people: Vec<String>,
+    /// The raw `jira_jql` filter (pre-composition), retained to bound the
+    /// on-demand person queries the same way board queries are bounded.
+    pub jira_jql: Option<String>,
+    /// TTL (seconds) for the per-issue Jira planning-date cache. Dates change
+    /// rarely; a longer TTL avoids re-running `acli workitem view` every refresh.
+    pub jira_date_cache_ttl_secs: u64,
     pub github_project: Option<GitHubProject>,
     pub jira: Option<JiraConfig>,
 }
@@ -46,6 +57,15 @@ fn default_jira_base_url() -> String {
 pub struct JiraBoard {
     #[serde(default)]
     pub projects: Vec<String>,
+}
+
+/// People whose related tickets (assigned to / created by) are pulled across
+/// all projects, configured as a `[jira_people]` table. Users are emails.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct JiraPeople {
+    #[serde(default)]
+    pub users: Vec<String>,
 }
 
 /// GitHub Projects v2 board used to enrich issues with planning dates.
@@ -93,6 +113,7 @@ pub enum ConfigError {
     InvalidModeEnv(String),
     InvalidGitHubRepo(String),
     InvalidJiraProject(String),
+    InvalidJiraUser(String),
 }
 
 impl std::fmt::Display for ConfigError {
@@ -117,6 +138,12 @@ impl std::fmt::Display for ConfigError {
                 write!(
                     f,
                     "invalid Jira project key: {key} (must be non-empty with no whitespace)"
+                )
+            }
+            Self::InvalidJiraUser(user) => {
+                write!(
+                    f,
+                    "invalid Jira user: {user} (must be a non-empty email with no whitespace)"
                 )
             }
         }
@@ -145,7 +172,10 @@ struct FileConfig {
     mode: Option<ServerMode>,
     github_repos: Option<Vec<String>>,
     jira_jql: Option<String>,
+    jira_date_cache_ttl_secs: Option<u64>,
     jira_board: Option<JiraBoard>,
+    jira_base_url: Option<String>,
+    jira_people: Option<JiraPeople>,
     github_project: Option<GitHubProject>,
     jira: Option<JiraConfig>,
 }
@@ -187,8 +217,17 @@ pub fn load_runtime_config(
         .map(|board| board.projects)
         .unwrap_or_default();
     validate_jira_projects(&jira_projects)?;
+    let jira_users = file_config
+        .jira_people
+        .map(|people| people.users)
+        .unwrap_or_default();
+    validate_jira_users(&jira_users)?;
+    let jira_base_url = file_config
+        .jira_base_url
+        .unwrap_or_else(default_jira_base_url);
     let raw_jira_jql = env.jira_jql.map(str::to_string).or(file_config.jira_jql);
-    let jira_queries = compose_jira_queries(&jira_projects, raw_jira_jql.as_deref());
+    let jira_queries = compose_jira_queries(&jira_projects, &jira_users, raw_jira_jql.as_deref());
+    let jira_date_cache_ttl_secs = file_config.jira_date_cache_ttl_secs.unwrap_or(600);
 
     Ok(RuntimeConfig {
         bind_addr,
@@ -196,6 +235,10 @@ pub fn load_runtime_config(
         mode,
         github_repos,
         jira_queries,
+        jira_base_url,
+        jira_people: jira_users,
+        jira_jql: raw_jira_jql,
+        jira_date_cache_ttl_secs,
         github_project: file_config.github_project,
         jira: file_config.jira,
     })
@@ -231,11 +274,17 @@ fn parse_env_mode(value: &str) -> Result<ServerMode, ConfigError> {
 /// JQL's own ordering when it has one, else a default. With no projects the raw
 /// JQL (or a bare default) is the sole query, verbatim, preserving the plain-JQL
 /// configuration path.
-fn compose_jira_queries(projects: &[String], raw_jql: Option<&str>) -> Vec<String> {
+fn compose_jira_queries(
+    projects: &[String],
+    users: &[String],
+    raw_jql: Option<&str>,
+) -> Vec<String> {
     const DEFAULT_ORDER: &str = "ORDER BY updated DESC";
     let raw = raw_jql.map(str::trim).filter(|jql| !jql.is_empty());
 
-    if projects.is_empty() {
+    // Escape hatch preserved: with no projects AND no users, the raw JQL (or a
+    // bare default) is the sole query, verbatim.
+    if projects.is_empty() && users.is_empty() {
         return vec![raw.unwrap_or(DEFAULT_ORDER).to_string()];
     }
 
@@ -245,7 +294,7 @@ fn compose_jira_queries(projects: &[String], raw_jql: Option<&str>) -> Vec<Strin
     };
     let order = raw_order.unwrap_or(DEFAULT_ORDER);
 
-    projects
+    let mut queries: Vec<String> = projects
         .iter()
         .map(|key| {
             if raw_where.is_empty() {
@@ -254,7 +303,60 @@ fn compose_jira_queries(projects: &[String], raw_jql: Option<&str>) -> Vec<Strin
                 format!("(project = {key}) AND ({raw_where}) {order}")
             }
         })
-        .collect()
+        .collect();
+
+    if !users.is_empty() {
+        let list = users
+            .iter()
+            .map(|user| format!("\"{user}\""))
+            .collect::<Vec<_>>()
+            .join(",");
+        let clause = format!("(assignee in ({list}) OR reporter in ({list}))");
+        let where_part = if raw_where.is_empty() {
+            clause
+        } else {
+            format!("({clause}) AND ({raw_where})")
+        };
+        queries.push(format!("{where_part} {order}"));
+    }
+
+    queries
+}
+
+/// The JQL pair for a People-page fetch: tickets created by the person and,
+/// when an accountId is known, tickets mentioning them (full-text proxy).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PersonQueries {
+    pub created_by: String,
+    pub mentioned: Option<String>,
+}
+
+/// Compose the created-by (`reporter = email`) and mentioned
+/// (`text ~ accountId`) JQL for a person, each AND'd with the raw `jira_jql`
+/// where-clause when present and sharing its ORDER BY (else a default).
+pub fn compose_person_queries(
+    email: &str,
+    account_id: Option<&str>,
+    raw_jql: Option<&str>,
+) -> PersonQueries {
+    const DEFAULT_ORDER: &str = "ORDER BY updated DESC";
+    let raw = raw_jql.map(str::trim).filter(|jql| !jql.is_empty());
+    let (raw_where, raw_order) = match raw {
+        Some(raw) => split_order_by(raw),
+        None => ("", None),
+    };
+    let order = raw_order.unwrap_or(DEFAULT_ORDER);
+    let with_filter = |clause: String| {
+        if raw_where.is_empty() {
+            format!("{clause} {order}")
+        } else {
+            format!("({clause}) AND ({raw_where}) {order}")
+        }
+    };
+    PersonQueries {
+        created_by: with_filter(format!("reporter = \"{email}\"")),
+        mentioned: account_id.map(|id| with_filter(format!("text ~ \"{id}\""))),
+    }
 }
 
 /// Split a JQL string into its where-clause and a trailing `ORDER BY ...` clause
@@ -271,6 +373,15 @@ fn validate_jira_projects(projects: &[String]) -> Result<(), ConfigError> {
     for key in projects {
         if key.is_empty() || key.chars().any(char::is_whitespace) {
             return Err(ConfigError::InvalidJiraProject(key.clone()));
+        }
+    }
+    Ok(())
+}
+
+fn validate_jira_users(users: &[String]) -> Result<(), ConfigError> {
+    for user in users {
+        if user.is_empty() || user.chars().any(char::is_whitespace) || user.contains('"') {
+            return Err(ConfigError::InvalidJiraUser(user.clone()));
         }
     }
     Ok(())
@@ -350,6 +461,71 @@ mod tests {
     }
 
     #[test]
+    fn jira_date_cache_ttl_defaults_to_600() {
+        let home_dir = TestDir::new();
+        let config_path = write_config(home_dir.path(), "github_repos = []\n");
+        let config =
+            load_runtime_config(&config_path, EnvOverrides::default()).expect("config should load");
+        assert_eq!(config.jira_date_cache_ttl_secs, 600);
+    }
+
+    #[test]
+    fn jira_date_cache_ttl_is_overridable() {
+        let home_dir = TestDir::new();
+        let config_path = write_config(home_dir.path(), "jira_date_cache_ttl_secs = 120\n");
+        let config =
+            load_runtime_config(&config_path, EnvOverrides::default()).expect("config should load");
+        assert_eq!(config.jira_date_cache_ttl_secs, 120);
+    }
+
+    #[test]
+    fn compose_person_queries_created_by_only_without_account() {
+        let q = super::compose_person_queries("a@x", None, None);
+        assert_eq!(q.created_by, "reporter = \"a@x\" ORDER BY updated DESC");
+        assert_eq!(q.mentioned, None);
+    }
+
+    #[test]
+    fn compose_person_queries_includes_mentioned_when_account_present() {
+        let q = super::compose_person_queries("a@x", Some("acc:1"), None);
+        assert_eq!(q.created_by, "reporter = \"a@x\" ORDER BY updated DESC");
+        assert_eq!(
+            q.mentioned.as_deref(),
+            Some("text ~ \"acc:1\" ORDER BY updated DESC")
+        );
+    }
+
+    #[test]
+    fn compose_person_queries_ands_jira_jql_and_honors_order() {
+        let q = super::compose_person_queries(
+            "a@x",
+            Some("acc:1"),
+            Some("statusCategory != Done ORDER BY created DESC"),
+        );
+        assert_eq!(
+            q.created_by,
+            "(reporter = \"a@x\") AND (statusCategory != Done) ORDER BY created DESC"
+        );
+        assert_eq!(
+            q.mentioned.as_deref(),
+            Some("(text ~ \"acc:1\") AND (statusCategory != Done) ORDER BY created DESC")
+        );
+    }
+
+    #[test]
+    fn runtime_config_retains_jira_people_and_jql() {
+        let home_dir = TestDir::new();
+        let config_path = write_config(
+            home_dir.path(),
+            "jira_jql = \"statusCategory != Done\"\n\n[jira_people]\nusers = [\"a@x\"]\n",
+        );
+        let config =
+            load_runtime_config(&config_path, EnvOverrides::default()).expect("config should load");
+        assert_eq!(config.jira_people, vec!["a@x".to_string()]);
+        assert_eq!(config.jira_jql.as_deref(), Some("statusCategory != Done"));
+    }
+
+    #[test]
     fn loads_multiple_github_repos_from_toml() {
         let home_dir = TestDir::new();
         let config_path = write_config(
@@ -374,6 +550,10 @@ jira_jql = "project = TEAM order by updated desc"
                 mode: ServerMode::Fixtures,
                 github_repos: vec!["openai/quasar".to_string(), "rust-lang/rust".to_string()],
                 jira_queries: vec!["project = TEAM order by updated desc".to_string()],
+                jira_base_url: "https://quera.atlassian.net".to_string(),
+                jira_people: Vec::new(),
+                jira_jql: Some("project = TEAM order by updated desc".to_string()),
+                jira_date_cache_ttl_secs: 600,
                 github_project: None,
                 jira: None,
             }
@@ -427,14 +607,115 @@ base_url = "https://example.atlassian.net"
     }
 
     #[test]
+    fn compose_jira_queries_appends_person_query_for_users() {
+        let queries = super::compose_jira_queries(
+            &["SSW".to_string()],
+            &["a@x".to_string(), "b@x".to_string()],
+            None,
+        );
+        assert_eq!(
+            queries,
+            vec![
+                "project = SSW ORDER BY updated DESC".to_string(),
+                "(assignee in (\"a@x\",\"b@x\") OR reporter in (\"a@x\",\"b@x\")) ORDER BY updated DESC"
+                    .to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn compose_jira_queries_person_query_ands_raw_jql_and_honors_order() {
+        let queries = super::compose_jira_queries(
+            &[],
+            &["a@x".to_string()],
+            Some("statusCategory != Done ORDER BY created DESC"),
+        );
+        assert_eq!(
+            queries,
+            vec![
+                "((assignee in (\"a@x\") OR reporter in (\"a@x\"))) AND (statusCategory != Done) ORDER BY created DESC"
+                    .to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn compose_jira_queries_no_projects_no_users_is_unchanged() {
+        assert_eq!(
+            super::compose_jira_queries(&[], &[], Some("project = X order by created desc")),
+            vec!["project = X order by created desc".to_string()]
+        );
+        assert_eq!(
+            super::compose_jira_queries(&[], &[], None),
+            vec!["ORDER BY updated DESC".to_string()]
+        );
+    }
+
+    #[test]
+    fn loads_jira_people_and_base_url_from_toml() {
+        let home_dir = TestDir::new();
+        let config_path = write_config(
+            home_dir.path(),
+            r#"
+jira_base_url = "https://acme.atlassian.net"
+
+[jira_board]
+projects = ["SSW"]
+
+[jira_people]
+users = ["a@x", "b@x"]
+"#,
+        );
+        let config =
+            load_runtime_config(&config_path, EnvOverrides::default()).expect("config should load");
+        assert_eq!(config.jira_base_url, "https://acme.atlassian.net");
+        assert_eq!(
+            config.jira_queries,
+            vec![
+                "project = SSW ORDER BY updated DESC".to_string(),
+                "(assignee in (\"a@x\",\"b@x\") OR reporter in (\"a@x\",\"b@x\")) ORDER BY updated DESC"
+                    .to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn jira_people_rejects_user_with_whitespace() {
+        let home_dir = TestDir::new();
+        let config_path = write_config(home_dir.path(), "[jira_people]\nusers = [\"a b@x\"]\n");
+        let error = load_runtime_config(&config_path, EnvOverrides::default())
+            .expect_err("whitespace user should be rejected");
+        assert!(matches!(error, ConfigError::InvalidJiraUser(_)));
+    }
+
+    #[test]
+    fn jira_people_rejects_user_with_quote() {
+        let home_dir = TestDir::new();
+        let config_path = write_config(home_dir.path(), "[jira_people]\nusers = [\"a\\\"@x\"]\n");
+        let error = load_runtime_config(&config_path, EnvOverrides::default())
+            .expect_err("user with a double-quote should be rejected");
+        assert!(matches!(error, ConfigError::InvalidJiraUser(_)));
+    }
+
+    #[test]
+    fn jira_base_url_defaults_when_absent() {
+        let home_dir = TestDir::new();
+        let config_path = write_config(home_dir.path(), "github_repos = []\n");
+        let config =
+            load_runtime_config(&config_path, EnvOverrides::default()).expect("config should load");
+        assert_eq!(config.jira_base_url, "https://quera.atlassian.net");
+    }
+
+    #[test]
     fn compose_jira_queries_board_only_adds_default_order() {
-        let queries = super::compose_jira_queries(&["SSW".to_string()], None);
+        let queries = super::compose_jira_queries(&["SSW".to_string()], &[], None);
         assert_eq!(queries, vec!["project = SSW ORDER BY updated DESC"]);
     }
 
     #[test]
     fn compose_jira_queries_one_query_per_project() {
-        let queries = super::compose_jira_queries(&["SSW".to_string(), "ENG".to_string()], None);
+        let queries =
+            super::compose_jira_queries(&["SSW".to_string(), "ENG".to_string()], &[], None);
         assert_eq!(
             queries,
             vec![
@@ -448,6 +729,7 @@ base_url = "https://example.atlassian.net"
     fn compose_jira_queries_ands_each_project_with_extra_jql() {
         let queries = super::compose_jira_queries(
             &["SSW".to_string(), "ENG".to_string()],
+            &[],
             Some("statusCategory != Done"),
         );
         assert_eq!(
@@ -463,6 +745,7 @@ base_url = "https://example.atlassian.net"
     fn compose_jira_queries_honors_extra_jql_order_by() {
         let queries = super::compose_jira_queries(
             &["SSW".to_string()],
+            &[],
             Some("statusCategory != Done ORDER BY created DESC"),
         );
         assert_eq!(
@@ -473,13 +756,14 @@ base_url = "https://example.atlassian.net"
 
     #[test]
     fn compose_jira_queries_raw_only_passes_through_verbatim() {
-        let queries = super::compose_jira_queries(&[], Some("project = SSW order by created desc"));
+        let queries =
+            super::compose_jira_queries(&[], &[], Some("project = SSW order by created desc"));
         assert_eq!(queries, vec!["project = SSW order by created desc"]);
     }
 
     #[test]
     fn compose_jira_queries_neither_defaults_to_order_by() {
-        let queries = super::compose_jira_queries(&[], None);
+        let queries = super::compose_jira_queries(&[], &[], None);
         assert_eq!(queries, vec!["ORDER BY updated DESC"]);
     }
 
@@ -641,6 +925,10 @@ github_repos = ["openai/quasar", "rust-lang/rust"]
                 mode: ServerMode::Cli,
                 github_repos: Vec::new(),
                 jira_queries: vec!["ORDER BY updated DESC".to_string()],
+                jira_base_url: "https://quera.atlassian.net".to_string(),
+                jira_people: Vec::new(),
+                jira_jql: None,
+                jira_date_cache_ttl_secs: 600,
                 github_project: None,
                 jira: None,
             }

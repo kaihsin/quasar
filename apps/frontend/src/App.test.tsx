@@ -54,7 +54,7 @@ describe("App shell", () => {
             title: "Audit issue sync",
             url: "https://example.com/101",
             status: "open",
-            assignee: "Kai",
+            assignees: ["Kai"],
             labels: ["sync"],
             priority: null,
             created_at: "2026-07-05T10:00:00Z",
@@ -73,7 +73,7 @@ describe("App shell", () => {
             title: "Mirror dashboard health",
             url: "https://jira.example.com/ABC-42",
             status: "in progress",
-            assignee: "Kai",
+            assignees: ["Kai"],
             labels: ["dashboard"],
             priority: "High",
             created_at: "2026-07-05T14:00:00Z",
@@ -115,7 +115,7 @@ describe("App shell", () => {
             title: "Open GitHub issue",
             url: "https://example.com/101",
             status: "open",
-            assignee: null,
+            assignees: [],
             labels: [],
             priority: null,
             created_at: "2026-07-05T10:00:00Z",
@@ -134,7 +134,7 @@ describe("App shell", () => {
             title: "Backlog ticket",
             url: "https://quera.atlassian.net/browse/SSW-1",
             status: "Selected for Development",
-            assignee: null,
+            assignees: [],
             labels: [],
             priority: null,
             created_at: "",
@@ -153,7 +153,7 @@ describe("App shell", () => {
             title: "Finished ticket",
             url: "https://quera.atlassian.net/browse/SSW-2",
             status: "Done",
-            assignee: null,
+            assignees: [],
             labels: [],
             priority: null,
             created_at: "",
@@ -201,7 +201,7 @@ describe("App shell", () => {
             title: "Dated issue",
             url: "https://example.com/101",
             status: "open",
-            assignee: null,
+            assignees: [],
             labels: [],
             priority: null,
             created_at: "2026-07-05T10:00:00Z",
@@ -220,7 +220,7 @@ describe("App shell", () => {
             title: "Undated issue",
             url: "https://example.com/102",
             status: "open",
-            assignee: null,
+            assignees: [],
             labels: [],
             priority: null,
             created_at: "2026-07-05T10:00:00Z",
@@ -263,7 +263,7 @@ describe("App shell", () => {
             title: "Fix scheduler race",
             url: "https://example.com/101",
             status: "open",
-            assignee: "Kai",
+            assignees: ["Kai"],
             labels: ["bug"],
             priority: null,
             created_at: "2026-07-05T10:00:00Z",
@@ -282,7 +282,7 @@ describe("App shell", () => {
             title: "Improve docs coverage",
             url: "https://jira.example.com/ABC-42",
             status: "in progress",
-            assignee: "Kai",
+            assignees: ["Kai"],
             labels: ["documentation"],
             priority: "High",
             created_at: "2026-07-05T14:00:00Z",
@@ -324,7 +324,7 @@ describe("App shell", () => {
             title: "Kai's issue",
             url: "https://example.com/101",
             status: "open",
-            assignee: "Kai Wu",
+            assignees: ["Kai Wu"],
             labels: [],
             priority: null,
             created_at: "2026-07-05T10:00:00Z",
@@ -343,7 +343,7 @@ describe("App shell", () => {
             title: "Roger's issue",
             url: "https://example.com/102",
             status: "open",
-            assignee: "Roger Luo",
+            assignees: ["Roger Luo"],
             labels: [],
             priority: null,
             created_at: "2026-07-05T10:00:00Z",
@@ -365,10 +365,152 @@ describe("App shell", () => {
     render(<App />);
 
     await screen.findByRole("button", { name: "Kai's issue" });
-    fireEvent.change(screen.getByLabelText("Assignee"), { target: { value: "Roger Luo" } });
+    // Open the assignee dropdown and check the "Roger Luo" option.
+    fireEvent.click(screen.getByLabelText("Assignee"));
+    fireEvent.click(screen.getByRole("checkbox", { name: "Roger Luo" }));
 
     expect(screen.queryByRole("button", { name: "Kai's issue" })).toBeNull();
     expect(screen.getByRole("button", { name: "Roger's issue" })).not.toBeNull();
+  });
+
+  it("shows items assigned to ANY selected assignee (OR semantics)", async () => {
+    global.fetch = (jest.fn().mockResolvedValue(
+      streamResponse({
+        data: [
+          {
+            source: "github",
+            id: "github:101",
+            external_id: "101",
+            title: "Kai's issue",
+            url: "https://example.com/101",
+            status: "open",
+            assignees: ["Kai Wu"],
+            labels: [],
+            priority: null,
+            created_at: "2026-07-05T10:00:00Z",
+            updated_at: "2026-07-06T09:00:00Z",
+            start_date: "",
+            target_date: "",
+            author: "octocat",
+            container: "openai/quasar",
+            repo: "openai/quasar",
+            source_metadata: null,
+          },
+          {
+            source: "github",
+            id: "github:102",
+            external_id: "102",
+            title: "Roger's issue",
+            url: "https://example.com/102",
+            status: "open",
+            assignees: ["Roger Luo"],
+            labels: [],
+            priority: null,
+            created_at: "2026-07-05T10:00:00Z",
+            updated_at: "2026-07-06T09:00:00Z",
+            start_date: "",
+            target_date: "",
+            author: "octocat",
+            container: "openai/quasar",
+            repo: "openai/quasar",
+            source_metadata: null,
+          },
+          {
+            source: "github",
+            id: "github:103",
+            external_id: "103",
+            title: "Sam's issue",
+            url: "https://example.com/103",
+            status: "open",
+            assignees: ["Sam Park"],
+            labels: [],
+            priority: null,
+            created_at: "2026-07-05T10:00:00Z",
+            updated_at: "2026-07-06T09:00:00Z",
+            start_date: "",
+            target_date: "",
+            author: "octocat",
+            container: "openai/quasar",
+            repo: "openai/quasar",
+            source_metadata: null,
+          },
+        ],
+        warnings: [],
+        fetched_at: "2026-07-06T12:00:00Z",
+        cache_status: "miss",
+      }),
+    ) as unknown) as typeof fetch;
+
+    render(<App />);
+
+    await screen.findByRole("button", { name: "Kai's issue" });
+    fireEvent.click(screen.getByLabelText("Assignee"));
+    fireEvent.click(screen.getByRole("checkbox", { name: "Kai Wu" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "Roger Luo" }));
+
+    // Both selected assignees match; the unselected one is hidden.
+    expect(screen.getByRole("button", { name: "Kai's issue" })).not.toBeNull();
+    expect(screen.getByRole("button", { name: "Roger's issue" })).not.toBeNull();
+    expect(screen.queryByRole("button", { name: "Sam's issue" })).toBeNull();
+  });
+
+  it("shows items with no assignees when Unassigned is selected", async () => {
+    global.fetch = (jest.fn().mockResolvedValue(
+      streamResponse({
+        data: [
+          {
+            source: "github",
+            id: "github:101",
+            external_id: "101",
+            title: "Kai's issue",
+            url: "https://example.com/101",
+            status: "open",
+            assignees: ["Kai Wu"],
+            labels: [],
+            priority: null,
+            created_at: "2026-07-05T10:00:00Z",
+            updated_at: "2026-07-06T09:00:00Z",
+            start_date: "",
+            target_date: "",
+            author: "octocat",
+            container: "openai/quasar",
+            repo: "openai/quasar",
+            source_metadata: null,
+          },
+          {
+            source: "github",
+            id: "github:102",
+            external_id: "102",
+            title: "Nobody's issue",
+            url: "https://example.com/102",
+            status: "open",
+            assignees: [],
+            labels: [],
+            priority: null,
+            created_at: "2026-07-05T10:00:00Z",
+            updated_at: "2026-07-06T09:00:00Z",
+            start_date: "",
+            target_date: "",
+            author: "octocat",
+            container: "openai/quasar",
+            repo: "openai/quasar",
+            source_metadata: null,
+          },
+        ],
+        warnings: [],
+        fetched_at: "2026-07-06T12:00:00Z",
+        cache_status: "miss",
+      }),
+    ) as unknown) as typeof fetch;
+
+    render(<App />);
+
+    await screen.findByRole("button", { name: "Kai's issue" });
+    fireEvent.click(screen.getByLabelText("Assignee"));
+    fireEvent.click(screen.getByRole("checkbox", { name: "Unassigned" }));
+
+    expect(screen.getByRole("button", { name: "Nobody's issue" })).not.toBeNull();
+    expect(screen.queryByRole("button", { name: "Kai's issue" })).toBeNull();
   });
 
   it("filters visible work items by source and status", async () => {
@@ -382,7 +524,7 @@ describe("App shell", () => {
             title: "Audit issue sync",
             url: "https://example.com/101",
             status: "open",
-            assignee: "Kai",
+            assignees: ["Kai"],
             labels: ["sync"],
             priority: null,
             created_at: "2026-07-05T10:00:00Z",
@@ -401,7 +543,7 @@ describe("App shell", () => {
             title: "Mirror dashboard health",
             url: "https://jira.example.com/ABC-42",
             status: "in progress",
-            assignee: "Kai",
+            assignees: ["Kai"],
             labels: ["dashboard"],
             priority: "High",
             created_at: "2026-07-05T14:00:00Z",
@@ -424,7 +566,9 @@ describe("App shell", () => {
 
     await screen.findByRole("button", { name: "Audit issue sync" });
     fireEvent.change(screen.getByLabelText("Source"), { target: { value: "jira" } });
-    fireEvent.change(screen.getByLabelText("Status"), { target: { value: "in progress" } });
+    // Status is a checkbox dropdown: open it, then check "in progress".
+    fireEvent.click(screen.getByLabelText("Status"));
+    fireEvent.click(screen.getByRole("checkbox", { name: "in progress" }));
 
     expect(screen.queryByText("Audit issue sync")).toBeNull();
     expect(
@@ -443,7 +587,7 @@ describe("App shell", () => {
             title: "Repo-aware issue",
             url: "https://example.com/101",
             status: "open",
-            assignee: "Kai",
+            assignees: ["Kai"],
             labels: ["sync"],
             priority: null,
             created_at: "2026-07-05T10:00:00Z",
@@ -462,7 +606,7 @@ describe("App shell", () => {
             title: "Fallback issue",
             url: "https://example.com/202",
             status: "open",
-            assignee: null,
+            assignees: [],
             labels: [],
             priority: null,
             created_at: "2026-07-05T10:00:00Z",
@@ -508,7 +652,7 @@ describe("App shell", () => {
             title: "Quasar issue",
             url: "https://example.com/101",
             status: "open",
-            assignee: "Kai",
+            assignees: ["Kai"],
             labels: ["sync"],
             priority: null,
             created_at: "2026-07-05T10:00:00Z",
@@ -527,7 +671,7 @@ describe("App shell", () => {
             title: "Platform issue",
             url: "https://example.com/202",
             status: "closed",
-            assignee: "Kai",
+            assignees: ["Kai"],
             labels: ["platform"],
             priority: null,
             created_at: "2026-07-05T11:00:00Z",
@@ -546,7 +690,7 @@ describe("App shell", () => {
             title: "Mirror dashboard health",
             url: "https://jira.example.com/ABC-42",
             status: "open",
-            assignee: "Kai",
+            assignees: ["Kai"],
             labels: ["dashboard"],
             priority: "High",
             created_at: "2026-07-05T14:00:00Z",
@@ -576,7 +720,8 @@ describe("App shell", () => {
       target: { value: "openai/quasar" },
     });
     fireEvent.change(screen.getByLabelText("Source"), { target: { value: "github" } });
-    fireEvent.change(screen.getByLabelText("Status"), { target: { value: "open" } });
+    fireEvent.click(screen.getByLabelText("Status"));
+    fireEvent.click(screen.getByRole("checkbox", { name: "open" }));
 
     expect(screen.getByRole("button", { name: "Quasar issue" })).not.toBeNull();
     expect(screen.queryByText("Platform issue")).toBeNull();
@@ -597,7 +742,7 @@ describe("App shell", () => {
               title: "Quasar issue",
               url: "https://example.com/101",
               status: "open",
-              assignee: "Kai",
+              assignees: ["Kai"],
               labels: ["sync"],
               priority: null,
               created_at: "2026-07-05T10:00:00Z",
@@ -616,7 +761,7 @@ describe("App shell", () => {
               title: "Jira issue",
               url: "https://jira.example.com/ABC-42",
               status: "In Review",
-              assignee: "Kai",
+              assignees: ["Kai"],
               labels: ["dashboard"],
               priority: "High",
               created_at: "2026-07-05T14:00:00Z",
@@ -644,7 +789,7 @@ describe("App shell", () => {
               title: "Platform issue",
               url: "https://example.com/202",
               status: "In Progress",
-              assignee: "Kai",
+              assignees: ["Kai"],
               labels: ["platform"],
               priority: null,
               created_at: "2026-07-05T11:00:00Z",
@@ -671,7 +816,10 @@ describe("App shell", () => {
     // source; the GitHub item makes "open" a real status) but jointly match
     // nothing — the Jira item is "In Review", not "open".
     fireEvent.change(screen.getByLabelText("Source"), { target: { value: "jira" } });
-    fireEvent.change(screen.getByLabelText("Status"), { target: { value: "open" } });
+    fireEvent.click(screen.getByLabelText("Status"));
+    fireEvent.click(screen.getByRole("checkbox", { name: "open" }));
+    // Close the dropdown so it doesn't overlay the results assertions below.
+    fireEvent.keyDown(document, { key: "Escape" });
 
     expect(screen.getByRole("heading", { name: "No work items match the current filters" })).not.toBeNull();
     expect(
@@ -688,7 +836,9 @@ describe("App shell", () => {
     expect(screen.queryByRole("heading", { name: "No work items match the current filters" })).toBeNull();
     expect((screen.getByLabelText("Repository / Project") as HTMLSelectElement).value).toBe("all");
     expect((screen.getByLabelText("Source") as HTMLSelectElement).value).toBe("all");
-    expect((screen.getByLabelText("Status") as HTMLSelectElement).value).toBe("all");
+    // Status is now a checkbox dropdown; the stale "open" selection is pruned,
+    // so its toggle button reflects the empty ("All") state.
+    expect(screen.getByLabelText("Status").textContent).toContain("All");
     expect(await screen.findByText("Last fetch: 2026-07-06T13:00:00Z • 1 item(s)")).not.toBeNull();
   });
 
@@ -704,7 +854,7 @@ describe("App shell", () => {
           title: "GH issue",
           url: "https://example.com/101",
           status: "open",
-          assignee: null,
+          assignees: [],
           labels: [],
           priority: null,
           created_at: "2026-07-05T10:00:00Z",
@@ -723,7 +873,7 @@ describe("App shell", () => {
           title: "Jira ticket",
           url: "https://quera.atlassian.net/browse/SSW-1",
           status: "Selected for Development",
-          assignee: null,
+          assignees: [],
           labels: [],
           priority: null,
           created_at: "",
@@ -780,5 +930,57 @@ describe("App shell", () => {
     const projectFilter = screen.getByLabelText("Project") as HTMLSelectElement;
     expect(within(projectFilter).getByRole("option", { name: "SSW" })).not.toBeNull();
     expect(within(projectFilter).queryByRole("option", { name: "openai/quasar" })).toBeNull();
+  });
+
+  it("renders a single card when the same id arrives in two separate items chunks", async () => {
+    // A ticket can match more than one query (e.g. a board project and the
+    // person query), so the stream may deliver the same id in distinct chunks.
+    // Build the NDJSON body inline (two `items` lines, then `done`) since the
+    // shared streamResponse helper emits only one items chunk.
+    const dup = {
+      source: "jira",
+      id: "jira:SSW-1",
+      external_id: "SSW-1",
+      title: "Dup issue",
+      url: "https://quera.atlassian.net/browse/SSW-1",
+      status: "open",
+      assignees: [],
+      labels: [],
+      priority: null,
+      created_at: "",
+      updated_at: "",
+      start_date: "",
+      target_date: "",
+      author: null,
+      container: "SSW",
+      repo: null,
+      source_metadata: null,
+    };
+    const body =
+      JSON.stringify({ type: "items", data: [dup], warnings: [] }) +
+      "\n" +
+      JSON.stringify({ type: "items", data: [dup], warnings: [] }) +
+      "\n" +
+      JSON.stringify({ type: "done", fetched_at: "2026-07-06T12:00:00Z", cache_status: "miss" }) +
+      "\n";
+    const chunks = [new TextEncoder().encode(body)];
+    let index = 0;
+    const response = {
+      ok: true,
+      body: {
+        getReader: () => ({
+          read: async () =>
+            index < chunks.length
+              ? { done: false, value: chunks[index++] }
+              : { done: true, value: undefined },
+        }),
+      },
+    };
+    global.fetch = (jest.fn().mockResolvedValue(response) as unknown) as typeof fetch;
+
+    render(<App />);
+    await screen.findByRole("button", { name: "Dup issue" });
+
+    expect(screen.getAllByRole("button", { name: "Dup issue" }).length).toBe(1);
   });
 });
