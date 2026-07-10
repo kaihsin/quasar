@@ -95,7 +95,7 @@ export default function App() {
   const [selectedContainer, setSelectedContainer] = useState<"all" | string>("all");
   const [selectedSource, setSelectedSource] = useState<"all" | string>("all");
   const [selectedStatus, setSelectedStatus] = useState<"all" | string>("all");
-  const [selectedAssignee, setSelectedAssignee] = useState<"all" | string>("all");
+  const [selectedAssignees, setSelectedAssignees] = useState<string[]>([]);
   const [searchQuery, setSearchQuery] = useState("");
   const [view, setView] = useState<"board" | "timeline">("board");
   const [selectedItemId, setSelectedItemId] = useState<string | null>(null);
@@ -195,9 +195,12 @@ export default function App() {
     if (!isSelectionAvailable(selectedStatus, availableStatuses)) {
       setSelectedStatus("all");
     }
-    if (!isSelectionAvailable(selectedAssignee, availableAssignees)) {
-      setSelectedAssignee("all");
-    }
+    setSelectedAssignees((prev) => {
+      const next = prev.filter((value) => availableAssignees.includes(value));
+      // Return the same reference when nothing was pruned so this effect (whose
+      // `availableAssignees` dep is a fresh array each render) doesn't loop.
+      return next.length === prev.length ? prev : next;
+    });
   }, [
     availableContainers,
     availableSources,
@@ -206,7 +209,6 @@ export default function App() {
     selectedContainer,
     selectedSource,
     selectedStatus,
-    selectedAssignee,
   ]);
 
   const searchTokens = searchQuery.trim().toLowerCase().split(/\s+/).filter(Boolean);
@@ -215,10 +217,9 @@ export default function App() {
     const sourceMatches = selectedSource === "all" || item.source === selectedSource;
     const statusMatches = selectedStatus === "all" || item.status === selectedStatus;
     const assigneeMatches =
-      selectedAssignee === "all" ||
-      (selectedAssignee === UNASSIGNED
-        ? item.assignees.length === 0
-        : item.assignees.includes(selectedAssignee));
+      selectedAssignees.length === 0 ||
+      (selectedAssignees.includes(UNASSIGNED) && item.assignees.length === 0) ||
+      item.assignees.some((name) => selectedAssignees.includes(name));
     const searchMatches = searchTokens.length === 0 || matchesSearch(item, searchTokens);
     return containerMatches && sourceMatches && statusMatches && assigneeMatches && searchMatches;
   });
@@ -318,11 +319,11 @@ export default function App() {
           onContainerChange={setSelectedContainer}
           onSourceChange={setSelectedSource}
           onStatusChange={setSelectedStatus}
-          onAssigneeChange={setSelectedAssignee}
+          onAssigneesChange={setSelectedAssignees}
           selectedContainer={selectedContainer}
           selectedSource={selectedSource}
           selectedStatus={selectedStatus}
-          selectedAssignee={selectedAssignee}
+          selectedAssignees={selectedAssignees}
         />
 
         {response?.warnings.length ? (

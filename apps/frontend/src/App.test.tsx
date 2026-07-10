@@ -365,10 +365,152 @@ describe("App shell", () => {
     render(<App />);
 
     await screen.findByRole("button", { name: "Kai's issue" });
-    fireEvent.change(screen.getByLabelText("Assignee"), { target: { value: "Roger Luo" } });
+    // Open the assignee dropdown and check the "Roger Luo" option.
+    fireEvent.click(screen.getByLabelText("Assignee"));
+    fireEvent.click(screen.getByRole("checkbox", { name: "Roger Luo" }));
 
     expect(screen.queryByRole("button", { name: "Kai's issue" })).toBeNull();
     expect(screen.getByRole("button", { name: "Roger's issue" })).not.toBeNull();
+  });
+
+  it("shows items assigned to ANY selected assignee (OR semantics)", async () => {
+    global.fetch = (jest.fn().mockResolvedValue(
+      streamResponse({
+        data: [
+          {
+            source: "github",
+            id: "github:101",
+            external_id: "101",
+            title: "Kai's issue",
+            url: "https://example.com/101",
+            status: "open",
+            assignees: ["Kai Wu"],
+            labels: [],
+            priority: null,
+            created_at: "2026-07-05T10:00:00Z",
+            updated_at: "2026-07-06T09:00:00Z",
+            start_date: "",
+            target_date: "",
+            author: "octocat",
+            container: "openai/quasar",
+            repo: "openai/quasar",
+            source_metadata: null,
+          },
+          {
+            source: "github",
+            id: "github:102",
+            external_id: "102",
+            title: "Roger's issue",
+            url: "https://example.com/102",
+            status: "open",
+            assignees: ["Roger Luo"],
+            labels: [],
+            priority: null,
+            created_at: "2026-07-05T10:00:00Z",
+            updated_at: "2026-07-06T09:00:00Z",
+            start_date: "",
+            target_date: "",
+            author: "octocat",
+            container: "openai/quasar",
+            repo: "openai/quasar",
+            source_metadata: null,
+          },
+          {
+            source: "github",
+            id: "github:103",
+            external_id: "103",
+            title: "Sam's issue",
+            url: "https://example.com/103",
+            status: "open",
+            assignees: ["Sam Park"],
+            labels: [],
+            priority: null,
+            created_at: "2026-07-05T10:00:00Z",
+            updated_at: "2026-07-06T09:00:00Z",
+            start_date: "",
+            target_date: "",
+            author: "octocat",
+            container: "openai/quasar",
+            repo: "openai/quasar",
+            source_metadata: null,
+          },
+        ],
+        warnings: [],
+        fetched_at: "2026-07-06T12:00:00Z",
+        cache_status: "miss",
+      }),
+    ) as unknown) as typeof fetch;
+
+    render(<App />);
+
+    await screen.findByRole("button", { name: "Kai's issue" });
+    fireEvent.click(screen.getByLabelText("Assignee"));
+    fireEvent.click(screen.getByRole("checkbox", { name: "Kai Wu" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "Roger Luo" }));
+
+    // Both selected assignees match; the unselected one is hidden.
+    expect(screen.getByRole("button", { name: "Kai's issue" })).not.toBeNull();
+    expect(screen.getByRole("button", { name: "Roger's issue" })).not.toBeNull();
+    expect(screen.queryByRole("button", { name: "Sam's issue" })).toBeNull();
+  });
+
+  it("shows items with no assignees when Unassigned is selected", async () => {
+    global.fetch = (jest.fn().mockResolvedValue(
+      streamResponse({
+        data: [
+          {
+            source: "github",
+            id: "github:101",
+            external_id: "101",
+            title: "Kai's issue",
+            url: "https://example.com/101",
+            status: "open",
+            assignees: ["Kai Wu"],
+            labels: [],
+            priority: null,
+            created_at: "2026-07-05T10:00:00Z",
+            updated_at: "2026-07-06T09:00:00Z",
+            start_date: "",
+            target_date: "",
+            author: "octocat",
+            container: "openai/quasar",
+            repo: "openai/quasar",
+            source_metadata: null,
+          },
+          {
+            source: "github",
+            id: "github:102",
+            external_id: "102",
+            title: "Nobody's issue",
+            url: "https://example.com/102",
+            status: "open",
+            assignees: [],
+            labels: [],
+            priority: null,
+            created_at: "2026-07-05T10:00:00Z",
+            updated_at: "2026-07-06T09:00:00Z",
+            start_date: "",
+            target_date: "",
+            author: "octocat",
+            container: "openai/quasar",
+            repo: "openai/quasar",
+            source_metadata: null,
+          },
+        ],
+        warnings: [],
+        fetched_at: "2026-07-06T12:00:00Z",
+        cache_status: "miss",
+      }),
+    ) as unknown) as typeof fetch;
+
+    render(<App />);
+
+    await screen.findByRole("button", { name: "Kai's issue" });
+    fireEvent.click(screen.getByLabelText("Assignee"));
+    fireEvent.click(screen.getByRole("checkbox", { name: "Unassigned" }));
+
+    expect(screen.getByRole("button", { name: "Nobody's issue" })).not.toBeNull();
+    expect(screen.queryByRole("button", { name: "Kai's issue" })).toBeNull();
   });
 
   it("filters visible work items by source and status", async () => {

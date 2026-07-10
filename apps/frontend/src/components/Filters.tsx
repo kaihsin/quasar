@@ -1,3 +1,5 @@
+import { useEffect, useRef, useState } from "react";
+
 type FilterValue = "all" | string;
 
 // A container is a GitHub repository or a Jira project. `value` is matched
@@ -14,11 +16,11 @@ export default function Filters({
   selectedContainer,
   selectedSource,
   selectedStatus,
-  selectedAssignee,
+  selectedAssignees,
   onContainerChange,
   onSourceChange,
   onStatusChange,
-  onAssigneeChange,
+  onAssigneesChange,
 }: {
   availableContainers: ContainerOption[];
   availableSources: string[];
@@ -28,11 +30,11 @@ export default function Filters({
   selectedContainer: FilterValue;
   selectedSource: FilterValue;
   selectedStatus: FilterValue;
-  selectedAssignee: FilterValue;
+  selectedAssignees: string[];
   onContainerChange: (value: FilterValue) => void;
   onSourceChange: (value: FilterValue) => void;
   onStatusChange: (value: FilterValue) => void;
-  onAssigneeChange: (value: FilterValue) => void;
+  onAssigneesChange: (values: string[]) => void;
 }) {
   return (
     <section aria-label="Filters" className="filters-panel">
@@ -86,19 +88,87 @@ export default function Filters({
 
       <div className="filter-field">
         <label htmlFor="assignee-filter">Assignee</label>
-        <select
+        <AssigneeMultiSelect
           id="assignee-filter"
-          onChange={(event) => onAssigneeChange(event.target.value)}
-          value={selectedAssignee}
-        >
-          <option value="all">All</option>
-          {availableAssignees.map((assignee) => (
-            <option key={assignee} value={assignee}>
-              {assignee}
-            </option>
-          ))}
-        </select>
+          options={availableAssignees}
+          selected={selectedAssignees}
+          onChange={onAssigneesChange}
+        />
       </div>
     </section>
+  );
+}
+
+function AssigneeMultiSelect({
+  id,
+  options,
+  selected,
+  onChange,
+}: {
+  id: string;
+  options: string[];
+  selected: string[];
+  onChange: (values: string[]) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    function onDocClick(event: MouseEvent) {
+      if (ref.current && !ref.current.contains(event.target as Node)) {
+        setOpen(false);
+      }
+    }
+    function onKey(event: KeyboardEvent) {
+      if (event.key === "Escape") setOpen(false);
+    }
+    document.addEventListener("mousedown", onDocClick);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDocClick);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+
+  const label = selected.length === 0 ? "All" : `${selected.length} selected`;
+  const toggle = (value: string) =>
+    onChange(
+      selected.includes(value)
+        ? selected.filter((v) => v !== value)
+        : [...selected, value],
+    );
+
+  return (
+    <div className="multiselect" ref={ref}>
+      <button
+        aria-expanded={open}
+        aria-haspopup="true"
+        className="multiselect-toggle"
+        id={id}
+        onClick={() => setOpen((v) => !v)}
+        type="button"
+      >
+        {label} ▾
+      </button>
+      {open ? (
+        <div aria-label="Assignee" className="multiselect-menu" role="group">
+          {options.length === 0 ? (
+            <span className="multiselect-empty">No assignees</span>
+          ) : (
+            options.map((option) => (
+              <label className="multiselect-option" key={option}>
+                <input
+                  checked={selected.includes(option)}
+                  onChange={() => toggle(option)}
+                  type="checkbox"
+                />
+                {option}
+              </label>
+            ))
+          )}
+        </div>
+      ) : null}
+    </div>
   );
 }

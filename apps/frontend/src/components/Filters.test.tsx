@@ -7,7 +7,7 @@ describe("Filters", () => {
     const onSourceChange = jest.fn();
     const onStatusChange = jest.fn();
     const onContainerChange = jest.fn();
-    const onAssigneeChange = jest.fn();
+    const onAssigneesChange = jest.fn();
 
     render(
       <Filters
@@ -22,11 +22,11 @@ describe("Filters", () => {
         selectedContainer="all"
         selectedSource="all"
         selectedStatus="all"
-        selectedAssignee="all"
+        selectedAssignees={[]}
         onContainerChange={onContainerChange}
         onSourceChange={onSourceChange}
         onStatusChange={onStatusChange}
-        onAssigneeChange={onAssigneeChange}
+        onAssigneesChange={onAssigneesChange}
       />,
     );
 
@@ -35,12 +35,45 @@ describe("Filters", () => {
     });
     fireEvent.change(screen.getByLabelText("Source"), { target: { value: "jira" } });
     fireEvent.change(screen.getByLabelText("Status"), { target: { value: "in progress" } });
-    fireEvent.change(screen.getByLabelText("Assignee"), { target: { value: "Roger" } });
+
+    // The assignee filter is a checkbox dropdown: open it, then toggle an option.
+    fireEvent.click(screen.getByLabelText("Assignee"));
+    fireEvent.click(screen.getByRole("checkbox", { name: "Roger" }));
 
     expect(onContainerChange).toHaveBeenCalledWith("openai/platform");
     expect(onSourceChange).toHaveBeenCalledWith("jira");
     expect(onStatusChange).toHaveBeenCalledWith("in progress");
-    expect(onAssigneeChange).toHaveBeenCalledWith("Roger");
+    expect(onAssigneesChange).toHaveBeenCalledWith(["Roger"]);
+  });
+
+  it("adds to an existing assignee selection when another option is toggled", async () => {
+    const onAssigneesChange = jest.fn();
+
+    render(
+      <Filters
+        availableContainers={[{ value: "openai/quasar", label: "openai/quasar" }]}
+        availableSources={["github"]}
+        availableStatuses={["open"]}
+        availableAssignees={["Kai", "Roger"]}
+        containerLabel="Repository"
+        selectedContainer="all"
+        selectedSource="all"
+        selectedStatus="all"
+        selectedAssignees={["Kai"]}
+        onContainerChange={jest.fn()}
+        onSourceChange={jest.fn()}
+        onStatusChange={jest.fn()}
+        onAssigneesChange={onAssigneesChange}
+      />,
+    );
+
+    // The toggle button (labeled "Assignee") reflects the current selection count.
+    const toggle = screen.getByLabelText("Assignee");
+    expect(toggle.textContent).toContain("1 selected");
+    fireEvent.click(toggle);
+    fireEvent.click(screen.getByRole("checkbox", { name: "Roger" }));
+
+    expect(onAssigneesChange).toHaveBeenCalledWith(["Kai", "Roger"]);
   });
 
   it("renders the container filter under the provided label", async () => {
@@ -54,11 +87,11 @@ describe("Filters", () => {
         selectedContainer="all"
         selectedSource="jira"
         selectedStatus="all"
-        selectedAssignee="all"
+        selectedAssignees={[]}
         onContainerChange={jest.fn()}
         onSourceChange={jest.fn()}
         onStatusChange={jest.fn()}
-        onAssigneeChange={jest.fn()}
+        onAssigneesChange={jest.fn()}
       />,
     );
 
