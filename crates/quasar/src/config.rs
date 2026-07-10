@@ -26,6 +26,9 @@ pub struct RuntimeConfig {
     /// The raw `jira_jql` filter (pre-composition), retained to bound the
     /// on-demand person queries the same way board queries are bounded.
     pub jira_jql: Option<String>,
+    /// TTL (seconds) for the per-issue Jira planning-date cache. Dates change
+    /// rarely; a longer TTL avoids re-running `acli workitem view` every refresh.
+    pub jira_date_cache_ttl_secs: u64,
     pub github_project: Option<GitHubProject>,
     pub jira: Option<JiraConfig>,
 }
@@ -169,6 +172,7 @@ struct FileConfig {
     mode: Option<ServerMode>,
     github_repos: Option<Vec<String>>,
     jira_jql: Option<String>,
+    jira_date_cache_ttl_secs: Option<u64>,
     jira_board: Option<JiraBoard>,
     jira_base_url: Option<String>,
     jira_people: Option<JiraPeople>,
@@ -223,6 +227,7 @@ pub fn load_runtime_config(
         .unwrap_or_else(default_jira_base_url);
     let raw_jira_jql = env.jira_jql.map(str::to_string).or(file_config.jira_jql);
     let jira_queries = compose_jira_queries(&jira_projects, &jira_users, raw_jira_jql.as_deref());
+    let jira_date_cache_ttl_secs = file_config.jira_date_cache_ttl_secs.unwrap_or(600);
 
     Ok(RuntimeConfig {
         bind_addr,
@@ -233,6 +238,7 @@ pub fn load_runtime_config(
         jira_base_url,
         jira_people: jira_users,
         jira_jql: raw_jira_jql,
+        jira_date_cache_ttl_secs,
         github_project: file_config.github_project,
         jira: file_config.jira,
     })
@@ -455,6 +461,24 @@ mod tests {
     }
 
     #[test]
+    fn jira_date_cache_ttl_defaults_to_600() {
+        let home_dir = TestDir::new();
+        let config_path = write_config(home_dir.path(), "github_repos = []\n");
+        let config =
+            load_runtime_config(&config_path, EnvOverrides::default()).expect("config should load");
+        assert_eq!(config.jira_date_cache_ttl_secs, 600);
+    }
+
+    #[test]
+    fn jira_date_cache_ttl_is_overridable() {
+        let home_dir = TestDir::new();
+        let config_path = write_config(home_dir.path(), "jira_date_cache_ttl_secs = 120\n");
+        let config =
+            load_runtime_config(&config_path, EnvOverrides::default()).expect("config should load");
+        assert_eq!(config.jira_date_cache_ttl_secs, 120);
+    }
+
+    #[test]
     fn compose_person_queries_created_by_only_without_account() {
         let q = super::compose_person_queries("a@x", None, None);
         assert_eq!(q.created_by, "reporter = \"a@x\" ORDER BY updated DESC");
@@ -529,6 +553,7 @@ jira_jql = "project = TEAM order by updated desc"
                 jira_base_url: "https://quera.atlassian.net".to_string(),
                 jira_people: Vec::new(),
                 jira_jql: Some("project = TEAM order by updated desc".to_string()),
+                jira_date_cache_ttl_secs: 600,
                 github_project: None,
                 jira: None,
             }
@@ -903,6 +928,7 @@ github_repos = ["openai/quasar", "rust-lang/rust"]
                 jira_base_url: "https://quera.atlassian.net".to_string(),
                 jira_people: Vec::new(),
                 jira_jql: None,
+                jira_date_cache_ttl_secs: 600,
                 github_project: None,
                 jira: None,
             }

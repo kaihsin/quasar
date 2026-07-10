@@ -18,6 +18,7 @@ fn build_app_state(config: &RuntimeConfig) -> AppState {
             GitHubSource::Cli,
             JiraSource::Cli,
             config.cache_ttl_secs,
+            config.jira_date_cache_ttl_secs,
             config.github_repos.clone(),
             config.jira_queries.clone(),
             config.jira_base_url.clone(),
@@ -30,6 +31,7 @@ fn build_app_state(config: &RuntimeConfig) -> AppState {
             GitHubSource::Fixture("crates/quasar/tests/fixtures/github/issues.json".into()),
             JiraSource::Fixture("crates/quasar/tests/fixtures/jira/issues.json".into()),
             config.cache_ttl_secs,
+            config.jira_date_cache_ttl_secs,
             config.github_repos.clone(),
             config.jira_queries.clone(),
             config.jira_base_url.clone(),
@@ -140,6 +142,7 @@ jira_jql = "project = TEAM order by updated desc"
                 jira_base_url: "https://quera.atlassian.net".to_string(),
                 jira_people: Vec::new(),
                 jira_jql: Some("project = TEAM order by updated desc".to_string()),
+                jira_date_cache_ttl_secs: 600,
                 github_project: None,
                 jira: None,
             }

@@ -43,6 +43,7 @@ pub struct AppState {
     pub github_source: GitHubSource,
     pub jira_source: JiraSource,
     pub cache: Arc<ResponseCache>,
+    pub date_cache: Arc<ResponseCache>,
     pub runner: Arc<dyn CommandRunner>,
     pub github_repos: Vec<String>,
     pub jira_queries: Vec<String>,
@@ -59,6 +60,7 @@ impl AppState {
         github_source: GitHubSource,
         jira_source: JiraSource,
         cache_ttl_secs: u64,
+        jira_date_cache_ttl_secs: u64,
         github_repos: Vec<String>,
         jira_queries: Vec<String>,
         jira_base_url: String,
@@ -72,6 +74,9 @@ impl AppState {
             jira_source,
             cache: Arc::new(ResponseCache::new(std::time::Duration::from_secs(
                 cache_ttl_secs,
+            ))),
+            date_cache: Arc::new(ResponseCache::new(std::time::Duration::from_secs(
+                jira_date_cache_ttl_secs,
             ))),
             runner: Arc::new(SystemCommandRunner),
             github_repos,
@@ -939,6 +944,7 @@ mod tests {
             github_source: GitHubSource::Fixture(github_source),
             jira_source: JiraSource::Fixture(jira_source),
             cache: Arc::new(ResponseCache::new(Duration::from_secs(30))),
+            date_cache: Arc::new(ResponseCache::new(std::time::Duration::from_secs(600))),
             runner: Arc::new(crate::clients::command_runner::SystemCommandRunner),
             github_repos: Vec::new(),
             jira_queries: vec!["order by updated desc".to_string()],
@@ -1172,6 +1178,7 @@ mod tests {
             github_source: GitHubSource::Cli,
             jira_source: JiraSource::Fixture(fixture_path("jira")),
             cache: Arc::new(ResponseCache::new(Duration::from_secs(30))),
+            date_cache: Arc::new(ResponseCache::new(std::time::Duration::from_secs(600))),
             runner: Arc::new(MockCommandRunner::new(HashMap::from([
                 ("openai/quasar".to_string(), Ok(github_payload)),
                 (
@@ -1238,6 +1245,7 @@ mod tests {
             github_source: GitHubSource::Cli,
             jira_source: JiraSource::Cli,
             cache: Arc::new(ResponseCache::new(Duration::from_secs(30))),
+            date_cache: Arc::new(ResponseCache::new(std::time::Duration::from_secs(600))),
             runner: Arc::new(runner),
             github_repos: Vec::new(),
             jira_queries,
@@ -1259,6 +1267,7 @@ mod tests {
             github_source: GitHubSource::Cli,
             jira_source: JiraSource::Cli,
             cache: Arc::new(ResponseCache::new(Duration::from_secs(30))),
+            date_cache: Arc::new(ResponseCache::new(std::time::Duration::from_secs(600))),
             runner: Arc::new(runner),
             github_repos: Vec::new(),
             jira_queries: Vec::new(),
@@ -1699,6 +1708,7 @@ mod tests {
             github_source: GitHubSource::Cli,
             jira_source: JiraSource::Fixture(fixture_path("jira")),
             cache: Arc::new(ResponseCache::new(Duration::from_secs(30))),
+            date_cache: Arc::new(ResponseCache::new(std::time::Duration::from_secs(600))),
             runner: Arc::new(RoutingRunner {
                 issues: std::fs::read_to_string(fixture_path("github"))
                     .expect("fixture should read"),
@@ -1794,6 +1804,7 @@ mod tests {
             github_source: GitHubSource::Cli,
             jira_source: JiraSource::Fixture(fixture_path("jira")),
             cache: Arc::new(ResponseCache::new(Duration::from_secs(30))),
+            date_cache: Arc::new(ResponseCache::new(std::time::Duration::from_secs(600))),
             runner: Arc::new(RoutingRunner {
                 issues: std::fs::read_to_string(fixture_path("github"))
                     .expect("fixture should read"),
@@ -1847,6 +1858,7 @@ mod tests {
             github_source: GitHubSource::Cli,
             jira_source: JiraSource::Fixture(fixture_path("jira")),
             cache: Arc::new(ResponseCache::new(Duration::from_secs(30))),
+            date_cache: Arc::new(ResponseCache::new(std::time::Duration::from_secs(600))),
             runner: Arc::new(MockCommandRunner::new(HashMap::new())),
             github_repos: Vec::new(),
             jira_queries: vec!["order by updated desc".to_string()],
@@ -1899,6 +1911,7 @@ mod tests {
             github_source: GitHubSource::Cli,
             jira_source: JiraSource::Fixture(fixture_path("jira")),
             cache: Arc::new(ResponseCache::new(Duration::from_secs(30))),
+            date_cache: Arc::new(ResponseCache::new(std::time::Duration::from_secs(600))),
             runner: Arc::new(Runner),
             github_repos: vec!["o/r".to_string()],
             jira_queries: vec!["order by updated desc".to_string()],
@@ -1951,6 +1964,7 @@ mod tests {
             github_source: GitHubSource::Fixture(fixture_path("github")),
             jira_source: JiraSource::Cli,
             cache: Arc::new(ResponseCache::new(Duration::from_secs(30))),
+            date_cache: Arc::new(ResponseCache::new(std::time::Duration::from_secs(600))),
             runner,
             github_repos: Vec::new(),
             jira_queries: vec!["order by updated desc".to_string()],
@@ -2137,6 +2151,7 @@ mod tests {
             github_source: GitHubSource::Cli,
             jira_source: JiraSource::Fixture(fixture_path("jira")),
             cache: Arc::new(ResponseCache::new(Duration::from_secs(30))),
+            date_cache: Arc::new(ResponseCache::new(std::time::Duration::from_secs(600))),
             runner: Arc::new(RoutingRunner {
                 issues: std::fs::read_to_string(fixture_path("github"))
                     .expect("fixture should read"),
