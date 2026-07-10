@@ -68,7 +68,9 @@ pub fn load_fixture_work_items(path: &Path, base_url: &str) -> AdapterResult<Vec
     normalize_work_items(&raw, base_url)
 }
 
-pub fn load_work_items_with_runner(
+/// Search + normalize only (no per-issue date enrichment). Used by the People
+/// page, where the result set can be large and dates aren't needed.
+pub fn search_work_items(
     runner: &dyn CommandRunner,
     jql: &str,
     base_url: &str,
@@ -92,9 +94,54 @@ pub fn load_work_items_with_runner(
         )
         .map_err(|error| -> Box<dyn std::error::Error + Send + Sync> { Box::new(error) })?;
 
-    let mut items = normalize_work_items(&raw, base_url)?;
+    normalize_work_items(&raw, base_url)
+}
+
+pub fn load_work_items_with_runner(
+    runner: &dyn CommandRunner,
+    jql: &str,
+    base_url: &str,
+) -> AdapterResult<Vec<WorkItem>> {
+    let mut items = search_work_items(runner, jql, base_url)?;
     enrich_planning_dates(runner, &mut items);
     Ok(items)
+}
+
+/// Best-effort: resolve a person's `(accountId, displayName)` from the reporter
+/// field of one of their created tickets (a single `--limit 1` search). `None`
+/// if they've created nothing or on any failure. Avoids needing `[jira]` creds.
+pub fn fetch_account_id_via_reporter(
+    runner: &dyn CommandRunner,
+    email: &str,
+) -> Option<(String, String)> {
+    let jql = format!("reporter = \"{email}\"");
+    let raw = runner
+        .run(
+            "acli",
+            &[
+                "jira", "workitem", "search", "--jql", &jql, "--fields", "key,reporter",
+                "--limit", "1", "--json",
+            ],
+        )
+        .ok()?;
+    #[derive(Deserialize)]
+    struct Issue {
+        fields: IssueFields,
+    }
+    #[derive(Deserialize)]
+    struct IssueFields {
+        reporter: Option<Reporter>,
+    }
+    #[derive(Deserialize)]
+    struct Reporter {
+        #[serde(rename = "accountId")]
+        account_id: String,
+        #[serde(rename = "displayName")]
+        display_name: String,
+    }
+    let issues: Vec<Issue> = serde_json::from_str(&raw).ok()?;
+    let reporter = issues.into_iter().next()?.fields.reporter?;
+    Some((reporter.account_id, reporter.display_name))
 }
 
 // `acli jira workitem view KEY --json` returns a single nested issue object;
@@ -760,6 +807,32 @@ mod tests {
             ]
         );
         assert_eq!(items.len(), 1);
+    }
+
+    #[test]
+    fn search_work_items_normalizes_without_enrichment() {
+        let payload = std::fs::read_to_string(fixture_path()).expect("fixture");
+        let runner = MockCommandRunner::success(&payload);
+        let items = super::search_work_items(&runner, "reporter = \"a@x\"", TEST_BASE)
+            .expect("search should normalize");
+        assert_eq!(items.len(), 1);
+        // Only the search call — no per-issue `view` enrichment calls.
+        assert_eq!(runner.calls.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn fetch_account_id_via_reporter_parses_account() {
+        let payload =
+            r#"[{"key":"X-1","fields":{"reporter":{"accountId":"acc:1","displayName":"Ann"}}}]"#;
+        let runner = MockCommandRunner::success(payload);
+        let got = super::fetch_account_id_via_reporter(&runner, "a@x");
+        assert_eq!(got, Some(("acc:1".to_string(), "Ann".to_string())));
+    }
+
+    #[test]
+    fn fetch_account_id_via_reporter_none_when_empty() {
+        let runner = MockCommandRunner::success("[]");
+        assert_eq!(super::fetch_account_id_via_reporter(&runner, "a@x"), None);
     }
 
     #[test]
