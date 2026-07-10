@@ -818,7 +818,7 @@ where
         // One project failing surfaces a warning without sinking the others.
         JiraSource::Cli => {
             for jql in &state.jira_queries {
-                match adapters::jira::load_work_items_with_runner(state.runner.as_ref(), jql, &state.jira_base_url) {
+                match adapters::jira::load_work_items_with_runner(state.runner.as_ref(), jql, &state.jira_base_url, state.date_cache.as_ref(), now) {
                     Ok(items) => emit_items(&mut emit, items, &mut data),
                     Err(error) => emit_warning(
                         &mut emit,

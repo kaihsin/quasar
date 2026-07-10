@@ -2,9 +2,11 @@ use std::fs;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
+use std::time::Instant;
 
 use serde::Deserialize;
 
+use crate::cache::{CacheOutcome, ResponseCache};
 use crate::clients::command_runner::CommandRunner;
 use crate::config::JiraConfig;
 use crate::domain::{Comment, WorkItem, WorkItemDetail, WorkSource};
@@ -18,7 +20,15 @@ const JIRA_TARGET_START_FIELD: &str = "customfield_10022";
 const JIRA_TARGET_END_FIELD: &str = "customfield_10023";
 
 /// Max concurrent `acli workitem view` processes when enriching planning dates.
-const ENRICH_CONCURRENCY: usize = 8;
+const ENRICH_CONCURRENCY: usize = 12;
+
+/// Cached planning dates for one issue, stored in the TTL date cache so future
+/// refreshes can skip the per-issue `view` until the entry expires.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct CachedDates {
+    start: String,
+    target: String,
+}
 
 // `acli jira workitem search --json` returns Jira's native nested shape:
 // `{ "key": "SSW-1", "fields": { "summary": ..., "status": { "name": ... }, ... } }`.
@@ -101,9 +111,11 @@ pub fn load_work_items_with_runner(
     runner: &dyn CommandRunner,
     jql: &str,
     base_url: &str,
+    date_cache: &ResponseCache,
+    now: Instant,
 ) -> AdapterResult<Vec<WorkItem>> {
     let mut items = search_work_items(runner, jql, base_url)?;
-    enrich_planning_dates(runner, &mut items);
+    enrich_planning_dates(runner, &mut items, date_cache, now);
     Ok(items)
 }
 
@@ -231,12 +243,35 @@ fn extract_text(value: &serde_json::Value) -> String {
 /// Best-effort: populate `start_date`/`target_date` on each item by fetching the
 /// per-issue `view` (bulk `search` cannot return date fields). Runs the `view`
 /// calls with bounded concurrency; any failed lookup simply leaves dates empty.
-fn enrich_planning_dates(runner: &dyn CommandRunner, items: &mut [WorkItem]) {
-    let keys: Vec<String> = items.iter().map(|item| item.external_id.clone()).collect();
-    if keys.is_empty() {
+fn enrich_planning_dates(
+    runner: &dyn CommandRunner,
+    items: &mut [WorkItem],
+    date_cache: &ResponseCache,
+    now: Instant,
+) {
+    // Apply cache hits in place; collect the indices that still need a `view`.
+    let mut to_fetch: Vec<usize> = Vec::new();
+    for (idx, item) in items.iter_mut().enumerate() {
+        let cache_key = format!("jira-dates:{}", item.external_id);
+        match date_cache.get(&cache_key, now) {
+            CacheOutcome::Hit(payload) => match serde_json::from_str::<CachedDates>(&payload) {
+                Ok(dates) => {
+                    item.start_date = dates.start;
+                    item.target_date = dates.target;
+                }
+                Err(_) => to_fetch.push(idx),
+            },
+            CacheOutcome::Miss => to_fetch.push(idx),
+        }
+    }
+    if to_fetch.is_empty() {
         return;
     }
 
+    let keys: Vec<(usize, String)> = to_fetch
+        .iter()
+        .map(|&idx| (idx, items[idx].external_id.clone()))
+        .collect();
     let next = AtomicUsize::new(0);
     let collected: Mutex<Vec<(usize, String, String)>> = Mutex::new(Vec::new());
     let workers = keys.len().min(ENRICH_CONCURRENCY).max(1);
@@ -245,25 +280,33 @@ fn enrich_planning_dates(runner: &dyn CommandRunner, items: &mut [WorkItem]) {
         for _ in 0..workers {
             scope.spawn(|| loop {
                 let index = next.fetch_add(1, Ordering::Relaxed);
-                let Some(key) = keys.get(index) else {
+                let Some((item_idx, key)) = keys.get(index) else {
                     break;
                 };
                 if let Some((start, target)) = fetch_issue_dates(runner, key) {
                     collected
                         .lock()
                         .expect("enrich collected mutex should not be poisoned")
-                        .push((index, start, target));
+                        .push((*item_idx, start, target));
                 }
             });
         }
     });
 
-    for (index, start, target) in collected
+    for (idx, start, target) in collected
         .into_inner()
         .expect("enrich collected mutex should not be poisoned")
     {
-        items[index].start_date = start;
-        items[index].target_date = target;
+        // Cache the result (including the empty/no-date case) so future refreshes
+        // skip the `view` for this issue until the TTL elapses.
+        if let Ok(payload) = serde_json::to_string(&CachedDates {
+            start: start.clone(),
+            target: target.clone(),
+        }) {
+            date_cache.insert(&format!("jira-dates:{}", items[idx].external_id), payload, now);
+        }
+        items[idx].start_date = start;
+        items[idx].target_date = target;
     }
 }
 
@@ -620,8 +663,10 @@ pub fn set_assignee(
 
 #[cfg(test)]
 mod tests {
+    use std::time::{Duration, Instant};
     use std::{path::PathBuf, sync::Mutex};
 
+    use crate::cache::ResponseCache;
     use crate::clients::command_runner::{CommandResult, CommandRunner, CommandRunnerError};
 
     use super::{load_fixture_work_items, load_work_items_with_runner};
@@ -770,8 +815,14 @@ mod tests {
         let payload = std::fs::read_to_string(fixture_path()).expect("fixture should read");
         let runner = MockCommandRunner::success(&payload);
 
-        let items = load_work_items_with_runner(&runner, "order by updated desc", TEST_BASE)
-            .expect("runner payload should load");
+        let items = load_work_items_with_runner(
+            &runner,
+            "order by updated desc",
+            TEST_BASE,
+            &ResponseCache::new(Duration::from_secs(600)),
+            Instant::now(),
+        )
+        .expect("runner payload should load");
 
         let calls = runner
             .calls
@@ -821,6 +872,59 @@ mod tests {
     }
 
     #[test]
+    fn enrichment_skips_view_on_date_cache_hit() {
+        let payload = std::fs::read_to_string(fixture_path()).expect("fixture");
+        let runner = MockCommandRunner::success(&payload);
+        let cache = ResponseCache::new(Duration::from_secs(600));
+        let now = Instant::now();
+        cache.insert(
+            "jira-dates:ABC-42",
+            r#"{"start":"2026-06-01","target":"2026-06-15"}"#.to_string(),
+            now,
+        );
+        let items = super::load_work_items_with_runner(
+            &runner, "order by updated desc", TEST_BASE, &cache, now,
+        )
+        .expect("load");
+        assert_eq!(items[0].start_date, "2026-06-01");
+        assert_eq!(items[0].target_date, "2026-06-15");
+        // Only the search call — the per-issue `view` was skipped by the cache hit.
+        assert_eq!(runner.calls.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn enrichment_populates_date_cache_on_miss() {
+        struct RoutingRunner {
+            issues: String,
+        }
+        impl CommandRunner for RoutingRunner {
+            fn run(&self, _p: &str, args: &[&str]) -> CommandResult<String> {
+                if args.contains(&"view") {
+                    Ok(r#"{"key":"ABC-42","fields":{"customfield_10022":"2026-07-01","customfield_10023":"2026-07-20"}}"#.to_string())
+                } else {
+                    Ok(self.issues.clone())
+                }
+            }
+        }
+        let runner = RoutingRunner {
+            issues: std::fs::read_to_string(fixture_path()).expect("fixture"),
+        };
+        let cache = ResponseCache::new(Duration::from_secs(600));
+        let now = Instant::now();
+        let items = super::load_work_items_with_runner(
+            &runner, "order by updated desc", TEST_BASE, &cache, now,
+        )
+        .expect("load");
+        assert_eq!(items[0].start_date, "2026-07-01");
+        assert_eq!(
+            cache.get("jira-dates:ABC-42", now),
+            crate::cache::CacheOutcome::Hit(
+                r#"{"start":"2026-07-01","target":"2026-07-20"}"#.to_string()
+            )
+        );
+    }
+
+    #[test]
     fn fetch_account_id_via_reporter_parses_account() {
         let payload =
             r#"[{"key":"X-1","fields":{"reporter":{"accountId":"acc:1","displayName":"Ann"}}}]"#;
@@ -860,8 +964,14 @@ mod tests {
                 .to_string(),
         };
 
-        let items = load_work_items_with_runner(&runner, "order by updated desc", TEST_BASE)
-            .expect("runner payload should load");
+        let items = load_work_items_with_runner(
+            &runner,
+            "order by updated desc",
+            TEST_BASE,
+            &ResponseCache::new(Duration::from_secs(600)),
+            Instant::now(),
+        )
+        .expect("runner payload should load");
 
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].start_date, "2026-07-01");
@@ -872,8 +982,14 @@ mod tests {
     fn jira_runner_propagates_cli_failures() {
         let runner = MockCommandRunner::failure("jira unavailable");
 
-        let error = load_work_items_with_runner(&runner, "order by updated desc", TEST_BASE)
-            .expect_err("runner should fail");
+        let error = load_work_items_with_runner(
+            &runner,
+            "order by updated desc",
+            TEST_BASE,
+            &ResponseCache::new(Duration::from_secs(600)),
+            Instant::now(),
+        )
+        .expect_err("runner should fail");
 
         assert!(error.to_string().contains("jira unavailable"));
     }
