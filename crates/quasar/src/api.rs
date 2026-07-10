@@ -89,6 +89,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/activity", get(activity))
         .route("/api/work-item-detail", get(work_item_detail))
         .route("/api/work-item-field", patch(update_work_item_field))
+        .route("/api/work-item-assignees", patch(update_work_item_assignees))
         .with_state(state)
 }
 
@@ -468,6 +469,95 @@ fn update_jira_field(
     Ok(())
 }
 
+#[derive(Deserialize)]
+struct UpdateAssigneesRequest {
+    id: String,
+    #[serde(default)]
+    assignee_ids: Vec<String>,
+}
+
+async fn update_work_item_assignees(
+    State(state): State<AppState>,
+    Json(body): Json<UpdateAssigneesRequest>,
+) -> Result<Json<UpdateDatesResponse>, (StatusCode, String)> {
+    set_work_item_assignees(&state, &body)
+        .map(|_| Json(UpdateDatesResponse { ok: true }))
+        .map_err(|error| (error.status, error.message))
+}
+
+fn set_work_item_assignees(
+    state: &AppState,
+    body: &UpdateAssigneesRequest,
+) -> Result<(), DetailError> {
+    if let Some(key) = body.id.strip_prefix("jira:") {
+        if key.is_empty() {
+            return Err(DetailError {
+                status: StatusCode::BAD_REQUEST,
+                message: "missing Jira issue key".to_string(),
+            });
+        }
+        if body.assignee_ids.len() > 1 {
+            return Err(DetailError {
+                status: StatusCode::BAD_REQUEST,
+                message: "Jira work items allow at most one assignee".to_string(),
+            });
+        }
+        if matches!(state.jira_source, JiraSource::Fixture(_)) {
+            return Err(DetailError {
+                status: StatusCode::CONFLICT,
+                message: "writes unavailable in fixture mode".to_string(),
+            });
+        }
+        let jira = state.jira_config.as_ref().ok_or_else(|| DetailError {
+            status: StatusCode::CONFLICT,
+            message: "no [jira] credentials configured; cannot edit Jira fields".to_string(),
+        })?;
+        adapters::jira::set_assignee(
+            state.runner.as_ref(),
+            jira,
+            key,
+            body.assignee_ids.first().map(String::as_str),
+        )
+        .map_err(|error| DetailError {
+            status: StatusCode::BAD_GATEWAY,
+            message: error.to_string(),
+        })?;
+        state.cache.invalidate("work-items");
+        return Ok(());
+    }
+
+    let rest = body.id.strip_prefix("github:").ok_or_else(|| DetailError {
+        status: StatusCode::BAD_REQUEST,
+        message: format!("unrecognized work-item id: {}", body.id),
+    })?;
+    let (repo, number) = rest.rsplit_once('#').ok_or_else(|| DetailError {
+        status: StatusCode::BAD_REQUEST,
+        message: format!("malformed GitHub id: {}", body.id),
+    })?;
+    if number.is_empty() || !number.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(DetailError {
+            status: StatusCode::BAD_REQUEST,
+            message: "issue number must be numeric".to_string(),
+        });
+    }
+    match &state.github_source {
+        GitHubSource::Fixture(_) => {
+            return Err(DetailError {
+                status: StatusCode::CONFLICT,
+                message: "writes unavailable in fixture mode".to_string(),
+            })
+        }
+        GitHubSource::Cli => {}
+    }
+    adapters::github::set_assignees(state.runner.as_ref(), repo, number, &body.assignee_ids)
+        .map_err(|error| DetailError {
+            status: StatusCode::BAD_GATEWAY,
+            message: error.to_string(),
+        })?;
+    state.cache.invalidate("work-items");
+    Ok(())
+}
+
 fn is_iso_date(value: &str) -> bool {
     let bytes = value.as_bytes();
     bytes.len() == 10
@@ -676,8 +766,9 @@ mod tests {
     use tower::ServiceExt;
 
     use super::{
-        fetch_work_item_field, fetch_work_items, resolve_work_items, router, AppState,
-        GitHubSource, JiraSource, StreamChunk, UpdateFieldRequest,
+        fetch_work_item_field, fetch_work_items, resolve_work_items, router,
+        set_work_item_assignees, AppState, GitHubSource, JiraSource, StreamChunk,
+        UpdateAssigneesRequest, UpdateFieldRequest,
     };
     use crate::{
         cache::{CacheOutcome, ResponseCache},
@@ -1711,5 +1802,127 @@ mod tests {
         )
         .expect_err("empty status should be rejected");
         assert_eq!(error.status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn update_assignees_rejects_fixture_mode() {
+        let app = router(app_state(fixture_path("github"), fixture_path("jira")));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri("/api/work-item-assignees")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"id":"github:openai/quasar#123","assignee_ids":["alice"]}"#,
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn update_assignees_rejects_unknown_id() {
+        let app = router(app_state(fixture_path("github"), fixture_path("jira")));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri("/api/work-item-assignees")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"id":"nonsense","assignee_ids":[]}"#))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn update_jira_assignee_rejects_multiple() {
+        // The >1 check must fire before any CLI call, so an unconfigured runner
+        // (which would error on use) proves no write was attempted.
+        let runner = Arc::new(JiraWriteRunner {
+            calls: Mutex::new(Vec::new()),
+        });
+        let state = jira_write_state(runner.clone(), Some(test_jira_config()));
+
+        let error = set_work_item_assignees(
+            &state,
+            &UpdateAssigneesRequest {
+                id: "jira:SSW-1".to_string(),
+                assignee_ids: vec!["a".to_string(), "b".to_string()],
+            },
+        )
+        .expect_err("multiple jira assignees should be rejected");
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+        assert!(
+            runner.calls.lock().unwrap().is_empty(),
+            "no CLI call should be made before the count check"
+        );
+    }
+
+    #[test]
+    fn update_assignees_github_success_invalidates_work_items_cache() {
+        // Routing runner answers both the CLI-mode work-items population
+        // (`gh issue list`) and the assignee-write sequence
+        // (`gh issue view --json assignees` then `gh issue edit`).
+        struct RoutingRunner {
+            issues: String,
+        }
+        impl CommandRunner for RoutingRunner {
+            fn run(&self, _program: &str, args: &[&str]) -> CommandResult<String> {
+                if args.contains(&"list") {
+                    return Ok(self.issues.clone());
+                }
+                if args.contains(&"view") {
+                    return Ok(r#"{"assignees":[]}"#.to_string());
+                }
+                // `gh issue edit`
+                Ok(String::new())
+            }
+        }
+
+        let state = AppState {
+            github_source: GitHubSource::Cli,
+            jira_source: JiraSource::Fixture(fixture_path("jira")),
+            cache: Arc::new(ResponseCache::new(Duration::from_secs(30))),
+            runner: Arc::new(RoutingRunner {
+                issues: std::fs::read_to_string(fixture_path("github"))
+                    .expect("fixture should read"),
+            }),
+            github_repos: vec!["openai/quasar".to_string()],
+            jira_queries: vec!["order by updated desc".to_string()],
+            github_project: None,
+            jira_config: None,
+        };
+
+        // Populate the cache (miss on first fetch).
+        let populated = fetch_work_items(&state);
+        assert_eq!(populated.cache_status, "miss");
+        assert!(matches!(
+            state.cache.get("work-items", Instant::now()),
+            CacheOutcome::Hit(_)
+        ));
+
+        // A successful assignee write must invalidate the cache.
+        let result = set_work_item_assignees(
+            &state,
+            &UpdateAssigneesRequest {
+                id: "github:openai/quasar#123".to_string(),
+                assignee_ids: vec!["alice".to_string()],
+            },
+        );
+        assert!(
+            result.is_ok(),
+            "expected ok, got status {:?}",
+            result.err().map(|error| error.status)
+        );
+        assert_eq!(
+            state.cache.get("work-items", Instant::now()),
+            CacheOutcome::Miss
+        );
     }
 }
