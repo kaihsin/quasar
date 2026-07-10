@@ -134,6 +134,8 @@ jira_jql = "project = TEAM order by updated desc"
                 github_repos: vec!["openai/quasar".to_string(), "rust-lang/rust".to_string()],
                 jira_queries: vec!["project = TEAM order by updated desc".to_string()],
                 jira_base_url: "https://quera.atlassian.net".to_string(),
+                jira_people: Vec::new(),
+                jira_jql: Some("project = TEAM order by updated desc".to_string()),
                 github_project: None,
                 jira: None,
             }
