@@ -115,7 +115,8 @@ Example config:
 
 ```toml
 bind_addr = "127.0.0.1:3000"
-cache_ttl_secs = 30
+cache_ttl_secs = 30                # work-items response cache TTL (seconds)
+jira_date_cache_ttl_secs = 600     # per-issue Jira Start/Target date cache TTL (seconds)
 mode = "cli"
 github_repos = [
   "openai/quasar",
@@ -248,6 +249,24 @@ pieces:
   to bound it — "all tickets related to a person" can be large (a prolific
   reporter can have hundreds), and each fetched item still costs a per-issue
   `view` call for planning-date enrichment, so a large person set slows refresh.
+
+**Planning-date enrichment (per-issue, cached).** `acli`'s bulk
+`workitem search` cannot return the Start/Target custom fields, so the backend
+enriches each issue's planning dates with a separate `acli workitem view` call
+per issue key. Those per-issue results are **cached in memory, keyed by issue
+key**, with a configurable TTL **`jira_date_cache_ttl_secs`** (default **600**
+seconds). On each refresh only issues **missing from the cache (or past the
+TTL)** are re-fetched, so subsequent refreshes are much faster than the first.
+Editing a Jira Target start/Target end date through the app **invalidates that
+issue's cached dates immediately**, so your own edits reflect right away; only
+*external* date changes can be stale until the TTL expires. This cache is
+in-memory only and is lost on restart, and it is **separate** from the
+short-lived work-items response cache (`cache_ttl_secs`, default 30s).
+
+Source fetching is **concurrent**: GitHub repos and Jira queries are resolved in
+parallel (rather than sequentially) and each is streamed to the UI as it
+completes, so a cold refresh takes about as long as the single slowest source
+instead of the sum of them all.
 
 The browse link on each Jira card (and the `↗` original link) is built from
 **`jira_base_url`** (top-level, optional, default `https://quera.atlassian.net`).
@@ -462,7 +481,13 @@ Implemented now:
 - configurable `jira_base_url` for Jira browse links (default
   `https://quera.atlassian.net`)
 - fixture-backed and CLI-backed adapter paths for GitHub and Jira
-- short-lived in-memory caching for API responses
+- short-lived in-memory caching for API responses (`cache_ttl_secs`, default 30s)
+- an in-memory per-issue Jira planning-date cache (from `acli workitem view`),
+  keyed by issue key with a configurable TTL (`jira_date_cache_ttl_secs`,
+  default 600s); only cache misses/expired entries are re-fetched on refresh,
+  and editing a Jira date invalidates that issue's entry immediately
+- concurrent GitHub + Jira source fetching, each streamed to the UI as it
+  completes, so a cold refresh runs about as long as the slowest single source
 - unified work-item rendering with explicit repo metadata in the payload
 - work items carrying a list of assignees (multiple on GitHub, 0 or 1 on Jira),
   shown as stacked avatars on cards and the timeline
