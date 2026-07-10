@@ -259,8 +259,10 @@ omit `[jira_board]` and write the whole query in `jira_jql`.
 
 Clicking a work-item card's title opens an overlay with the full issue/ticket
 body (rendered Markdown), the comment thread, and a metadata sidebar (status,
-assignee, author, labels, priority, dates, repo/project, and a link to the
-original). Detail is fetched lazily only when an item is opened, via
+assignees, author, labels, priority, dates, repo/project, and a link to the
+original). A work item carries a **list** of assignees — GitHub issues can have
+several, Jira has 0 or 1 — rendered as stacked avatars on cards and in the
+timeline. Detail is fetched lazily only when an item is opened, via
 `GET /api/work-item-detail?id=<work-item-id>`, and is not cached — each open
 fetches fresh from `gh issue view` / `acli jira workitem view`. The `↗` link on
 each card still opens the original issue/ticket in a new tab.
@@ -302,6 +304,26 @@ base_url = "https://your-site.atlassian.net"
 The token is stored in plaintext in `config.toml`, so keep the file readable
 only by you (`chmod 600`). Without a `[jira]` block, Jira fields stay read-only
 and edit attempts return `409`.
+
+Assignees are also editable inline. The list of assignable candidates is fetched
+lazily when an item is opened (GitHub `gh api repos/<repo>/assignees`; Jira
+`GET /rest/api/3/user/assignable/search?issueKey=<key>`) on a best-effort basis
+— if it can't be fetched, the assignee field renders read-only. Editing behaves
+per source:
+
+- **GitHub** — a checkbox list of the repo's assignable users; you can assign
+  several. Writes go through `gh issue edit --add-assignee`/`--remove-assignee`
+  (the backend diffs current vs. desired). This needs a `gh` token with write
+  access to the repo's issues; it does **not** require the Projects v2 `project`
+  scope or a `[github_project]` config.
+- **Jira** — a single-select dropdown (with a `(none)` option to unassign),
+  since Jira allows exactly one assignee. Writes go through the Jira REST API
+  (`PUT /rest/api/3/issue/<key>` with the assignee `accountId`, or `null` to
+  clear) and therefore require the `[jira]` credentials block, same as
+  date/status editing.
+
+Both sources use the same endpoint, `PATCH /api/work-item-assignees`
+(`{ id, assignee_ids: [...] }`).
 
 ## Backend Commands
 
@@ -361,17 +383,24 @@ Implemented now:
 - fixture-backed and CLI-backed adapter paths for GitHub and Jira
 - short-lived in-memory caching for API responses
 - unified work-item rendering with explicit repo metadata in the payload
+- work items carrying a list of assignees (multiple on GitHub, 0 or 1 on Jira),
+  shown as stacked avatars on cards and the timeline
 - summary cards, status chart, recent activity panel, and tests
-- source-aware container, source, status, and assignee filters in the frontend
+- source-aware container, source, and status filters plus a multi-select
+  assignee filter in the frontend
 - item detail overlay with lazily-fetched body, comments, and metadata
 - inline editing of GitHub start/target dates and board Status
+- inline editing of assignees (GitHub multi-select, Jira single-select)
 
 The second filter is **source-aware**: with Source = GitHub it lists
 repositories, with Source = Jira it lists projects, and with Source = All it
 shows a combined list (Jira entries hinted). Its options are drawn from each
 item's `container` (GitHub `owner/repo` or Jira project key), and the dashboard
 cards/list update against the active container, source, status, and assignee
-selections.
+selections. The container, source, and status filters are single-select, while
+the assignee filter (shared by the board and timeline views) is **multi-select**
+— a checkbox dropdown where selecting several people matches items assigned to
+**any** of them (OR), and an "Unassigned" entry matches items with no assignee.
 
 ## Launch Locally
 
