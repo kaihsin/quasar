@@ -1147,6 +1147,14 @@ mod tests {
     }
 
     #[test]
+    fn github_keeps_all_assignees() {
+        let payload = r#"[{"number":9,"title":"t","url":"https://github.com/o/r/issues/9","state":"OPEN","assignees":[{"login":"alice"},{"login":"bob"}],"labels":[],"createdAt":"2026-01-01T00:00:00Z","updatedAt":"2026-01-01T00:00:00Z","author":{"login":"a"}}]"#;
+        let runner = MockCommandRunner::success(payload);
+        let items = load_work_items_with_runner(&runner, "o/r", None).expect("load");
+        assert_eq!(items[0].assignees, vec!["alice".to_string(), "bob".to_string()]);
+    }
+
+    #[test]
     fn github_runner_invokes_expected_cli_arguments() {
         let payload = std::fs::read_to_string(fixture_path()).expect("fixture should read");
         let runner = MockCommandRunner::success(&payload);
