@@ -54,3 +54,10 @@ export interface WorkItemDetail {
 }
 
 export type WorkItemFieldKind = "start" | "target" | "status";
+
+export interface PersonWorkItems {
+  user: string;
+  account_id: string | null;
+  created_by: WorkItem[];
+  mentioned: WorkItem[];
+}

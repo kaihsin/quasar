@@ -1,4 +1,5 @@
 import type {
+  PersonWorkItems,
   SourceWarning,
   WorkItem,
   WorkItemFieldKind,
@@ -102,6 +103,21 @@ export async function updateWorkItemField(
   if (!response.ok) {
     throw new Error(`Request failed with status ${response.status}`);
   }
+}
+
+export async function fetchPeople(signal?: AbortSignal): Promise<string[]> {
+  const response = await fetch("/api/people", { signal });
+  if (!response.ok) throw new Error(`Request failed with status ${response.status}`);
+  return ((await response.json()) as { users: string[] }).users;
+}
+
+export async function fetchPersonWorkItems(
+  user: string,
+  signal?: AbortSignal,
+): Promise<PersonWorkItems> {
+  const response = await fetch(`/api/person-work-items?user=${encodeURIComponent(user)}`, { signal });
+  if (!response.ok) throw new Error(`Request failed with status ${response.status}`);
+  return (await response.json()) as PersonWorkItems;
 }
 
 export async function updateWorkItemAssignees(

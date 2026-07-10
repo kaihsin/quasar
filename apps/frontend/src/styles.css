@@ -1059,3 +1059,14 @@ button {
   align-items: center;
   gap: 6px;
 }
+
+.people-sections {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  margin-top: 14px;
+}
+
+.people-section h3 {
+  margin: 0 0 8px;
+}

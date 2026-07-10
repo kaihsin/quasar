@@ -5,10 +5,11 @@ import { streamWorkItems } from "./api";
 import ActivityPanel from "./components/ActivityPanel";
 import ItemDetailModal from "./components/ItemDetailModal";
 import Filters from "./components/Filters";
-import AssigneeAvatars from "./components/AssigneeAvatars";
+import PeoplePage from "./components/PeoplePage";
 import StatusChart from "./components/StatusChart";
 import SummaryCards from "./components/SummaryCards";
 import Timeline from "./components/Timeline";
+import WorkItemCard from "./components/WorkItemCard";
 import type { WorkItem, WorkItemsResponse } from "./types";
 
 const fallbackItems = [
@@ -39,14 +40,6 @@ function classifyStatus(status: string): ColumnKey {
     return "backlog";
   }
   return "open";
-}
-
-// Renders an ISO date/datetime as YYYY-MM-DD, or an em dash when unset.
-function formatDate(value: string): string {
-  if (!value) {
-    return "—";
-  }
-  return value.slice(0, 10);
 }
 
 // Numeric issue number for ordering: GitHub "845" -> 845, Jira "SSW-1131" -> 1131.
@@ -97,7 +90,7 @@ export default function App() {
   const [selectedStatuses, setSelectedStatuses] = useState<string[]>([]);
   const [selectedAssignees, setSelectedAssignees] = useState<string[]>([]);
   const [searchQuery, setSearchQuery] = useState("");
-  const [view, setView] = useState<"board" | "timeline">("board");
+  const [view, setView] = useState<"board" | "timeline" | "people">("board");
   const [selectedItemId, setSelectedItemId] = useState<string | null>(null);
 
   useEffect(() => {
@@ -295,6 +288,15 @@ export default function App() {
               >
                 Timeline
               </button>
+              <button
+                aria-selected={view === "people"}
+                className="view-tab"
+                onClick={() => setView("people")}
+                role="tab"
+                type="button"
+              >
+                People
+              </button>
             </div>
             <span className="status-pill">
               {response?.cache_status ? `Cache ${response.cache_status}` : "Read-only v1"}
@@ -342,7 +344,9 @@ export default function App() {
           </div>
         ) : null}
 
-        {filteredItems.length && view === "timeline" ? (
+        {view === "people" ? (
+          <PeoplePage onOpenItem={setSelectedItemId} />
+        ) : filteredItems.length && view === "timeline" ? (
           <Timeline items={filteredItems} />
         ) : filteredItems.length ? (
           <div
@@ -409,54 +413,5 @@ export default function App() {
         />
       ) : null}
     </main>
-  );
-}
-
-function WorkItemCard({ item, onOpen }: { item: WorkItem; onOpen: () => void }) {
-  const location = item.source === "github" && item.repo ? item.repo : item.container;
-
-  return (
-    <article className="work-item">
-      <div className="work-item-head">
-        <span className="work-item-number">{item.external_id}</span>
-        <span className={`source-badge source-${item.source}`}>{item.source}</span>
-        <button className="work-item-title work-item-title-button" onClick={onOpen} type="button">
-          {item.title}
-        </button>
-        <a
-          aria-label="Open original in new tab"
-          className="work-item-external"
-          href={item.url}
-          rel="noreferrer"
-          target="_blank"
-        >
-          ↗
-        </a>
-        <span className="work-item-location">{location}</span>
-        <AssigneeAvatars names={item.assignees} />
-      </div>
-      <div className="work-item-dates">
-        <span className="date-chip">
-          <span className="date-label">Start</span>
-          <span className="date-value">{formatDate(item.start_date)}</span>
-        </span>
-        <span className="date-chip date-chip-target">
-          <span className="date-label">Target</span>
-          <span className="date-value">{formatDate(item.target_date)}</span>
-        </span>
-      </div>
-      <div className="work-item-sub">
-        <span className="status-chip">{item.status}</span>
-        <span className="item-meta">
-          {item.assignees.length ? `Assigned to ${item.assignees.join(", ")}` : "Unassigned"}
-          {item.priority ? ` • Priority ${item.priority}` : ""}
-        </span>
-        {item.labels.map((label) => (
-          <span className="label-pill" key={label}>
-            {label}
-          </span>
-        ))}
-      </div>
-    </article>
   );
 }
