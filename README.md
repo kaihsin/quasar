@@ -368,6 +368,39 @@ per source:
 Both sources use the same endpoint, `PATCH /api/work-item-assignees`
 (`{ id, assignee_ids: [...] }`).
 
+## People Page
+
+Alongside the **Board** and **Timeline** views, a third **People** tab tracks a
+specific configured person's Jira tickets, fetched **on demand**. Opening the
+tab lists the configured `[jira_people]` emails in a single-select dropdown;
+**nothing is fetched until a person is selected** (lazy). Selecting a person
+fetches, via `GET /api/person-work-items?user=<email>`, two groups:
+
+- **Created by** — tickets where `reporter = <email>`.
+- **Mentioned** — a **best-effort full-text proxy**, `text ~ "<accountId>"`. Jira
+  has no exact @mention JQL, so this matches content where the person's
+  accountId appears (i.e. @mentions); it is **not** an exact match.
+
+Details and caveats:
+
+- The person's accountId is derived from the `reporter` field of one of their own
+  created tickets (a single `acli` search with `--limit 1`), so the page needs
+  **no `[jira]` REST credentials**. If the person has created nothing, the
+  accountId can't be resolved and the Mentioned section shows "mentions
+  unavailable" — Created-by still works.
+- Results are **deduplicated by issue key**: a ticket that is both created-by and
+  mentioned appears only under **Created by**.
+- The optional `jira_jql` filter is **AND'd** into both queries, bounding them.
+- The list is **not date-enriched** (cards show "—" for planning dates), keeping
+  the on-demand fetch fast.
+- Only preconfigured people can be queried — the endpoint rejects any `user` not
+  in `[jira_people]`.
+
+This reuses the **same** `[jira_people]` list already used for the board-stream
+merge (see [Jira Data Fetching](#jira-data-fetching)); that board behavior is
+unchanged. A companion endpoint, `GET /api/people`, returns the configured
+`[jira_people]` emails and powers the dropdown.
+
 ## Backend Commands
 
 Start the local API server:
@@ -439,6 +472,9 @@ Implemented now:
 - item detail overlay with lazily-fetched body, comments, and metadata
 - inline editing of GitHub start/target dates and board Status
 - inline editing of assignees (GitHub multi-select, Jira single-select)
+- a **People** tab that lazily fetches a configured person's Jira tickets on
+  demand (created-by, plus a best-effort full-text "mentioned" proxy), needing
+  no `[jira]` credentials
 
 The second filter is **source-aware**: with Source = GitHub it lists
 repositories, with Source = Jira it lists projects, and with Source = All it
