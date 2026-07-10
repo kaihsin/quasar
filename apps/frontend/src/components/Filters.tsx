@@ -15,11 +15,11 @@ export default function Filters({
   containerLabel,
   selectedContainer,
   selectedSource,
-  selectedStatus,
+  selectedStatuses,
   selectedAssignees,
   onContainerChange,
   onSourceChange,
-  onStatusChange,
+  onStatusesChange,
   onAssigneesChange,
 }: {
   availableContainers: ContainerOption[];
@@ -29,11 +29,11 @@ export default function Filters({
   containerLabel: string;
   selectedContainer: FilterValue;
   selectedSource: FilterValue;
-  selectedStatus: FilterValue;
+  selectedStatuses: string[];
   selectedAssignees: string[];
   onContainerChange: (value: FilterValue) => void;
   onSourceChange: (value: FilterValue) => void;
-  onStatusChange: (value: FilterValue) => void;
+  onStatusesChange: (values: string[]) => void;
   onAssigneesChange: (values: string[]) => void;
 }) {
   return (
@@ -72,24 +72,20 @@ export default function Filters({
 
       <div className="filter-field">
         <label htmlFor="status-filter">Status</label>
-        <select
+        <MultiSelectDropdown
           id="status-filter"
-          onChange={(event) => onStatusChange(event.target.value)}
-          value={selectedStatus}
-        >
-          <option value="all">All</option>
-          {availableStatuses.map((status) => (
-            <option key={status} value={status}>
-              {status}
-            </option>
-          ))}
-        </select>
+          menuLabel="Status"
+          options={availableStatuses}
+          selected={selectedStatuses}
+          onChange={onStatusesChange}
+        />
       </div>
 
       <div className="filter-field">
         <label htmlFor="assignee-filter">Assignee</label>
-        <AssigneeMultiSelect
+        <MultiSelectDropdown
           id="assignee-filter"
+          menuLabel="Assignee"
           options={availableAssignees}
           selected={selectedAssignees}
           onChange={onAssigneesChange}
@@ -99,13 +95,18 @@ export default function Filters({
   );
 }
 
-function AssigneeMultiSelect({
+// A checkbox-dropdown for OR-filtering by a set of values (used for Status and
+// Assignee). Empty selection means "All". `menuLabel` names the popup for
+// assistive tech and labels the toggle button via the field's <label htmlFor>.
+function MultiSelectDropdown({
   id,
+  menuLabel,
   options,
   selected,
   onChange,
 }: {
   id: string;
+  menuLabel: string;
   options: string[];
   selected: string[];
   onChange: (values: string[]) => void;
@@ -152,9 +153,9 @@ function AssigneeMultiSelect({
         {label} ▾
       </button>
       {open ? (
-        <div aria-label="Assignee" className="multiselect-menu" role="group">
+        <div aria-label={menuLabel} className="multiselect-menu" role="group">
           {options.length === 0 ? (
-            <span className="multiselect-empty">No assignees</span>
+            <span className="multiselect-empty">No options</span>
           ) : (
             options.map((option) => (
               <label className="multiselect-option" key={option}>

@@ -566,7 +566,9 @@ describe("App shell", () => {
 
     await screen.findByRole("button", { name: "Audit issue sync" });
     fireEvent.change(screen.getByLabelText("Source"), { target: { value: "jira" } });
-    fireEvent.change(screen.getByLabelText("Status"), { target: { value: "in progress" } });
+    // Status is a checkbox dropdown: open it, then check "in progress".
+    fireEvent.click(screen.getByLabelText("Status"));
+    fireEvent.click(screen.getByRole("checkbox", { name: "in progress" }));
 
     expect(screen.queryByText("Audit issue sync")).toBeNull();
     expect(
@@ -718,7 +720,8 @@ describe("App shell", () => {
       target: { value: "openai/quasar" },
     });
     fireEvent.change(screen.getByLabelText("Source"), { target: { value: "github" } });
-    fireEvent.change(screen.getByLabelText("Status"), { target: { value: "open" } });
+    fireEvent.click(screen.getByLabelText("Status"));
+    fireEvent.click(screen.getByRole("checkbox", { name: "open" }));
 
     expect(screen.getByRole("button", { name: "Quasar issue" })).not.toBeNull();
     expect(screen.queryByText("Platform issue")).toBeNull();
@@ -813,7 +816,10 @@ describe("App shell", () => {
     // source; the GitHub item makes "open" a real status) but jointly match
     // nothing — the Jira item is "In Review", not "open".
     fireEvent.change(screen.getByLabelText("Source"), { target: { value: "jira" } });
-    fireEvent.change(screen.getByLabelText("Status"), { target: { value: "open" } });
+    fireEvent.click(screen.getByLabelText("Status"));
+    fireEvent.click(screen.getByRole("checkbox", { name: "open" }));
+    // Close the dropdown so it doesn't overlay the results assertions below.
+    fireEvent.keyDown(document, { key: "Escape" });
 
     expect(screen.getByRole("heading", { name: "No work items match the current filters" })).not.toBeNull();
     expect(
@@ -830,7 +836,9 @@ describe("App shell", () => {
     expect(screen.queryByRole("heading", { name: "No work items match the current filters" })).toBeNull();
     expect((screen.getByLabelText("Repository / Project") as HTMLSelectElement).value).toBe("all");
     expect((screen.getByLabelText("Source") as HTMLSelectElement).value).toBe("all");
-    expect((screen.getByLabelText("Status") as HTMLSelectElement).value).toBe("all");
+    // Status is now a checkbox dropdown; the stale "open" selection is pruned,
+    // so its toggle button reflects the empty ("All") state.
+    expect(screen.getByLabelText("Status").textContent).toContain("All");
     expect(await screen.findByText("Last fetch: 2026-07-06T13:00:00Z • 1 item(s)")).not.toBeNull();
   });
 

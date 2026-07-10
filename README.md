@@ -386,8 +386,8 @@ Implemented now:
 - work items carrying a list of assignees (multiple on GitHub, 0 or 1 on Jira),
   shown as stacked avatars on cards and the timeline
 - summary cards, status chart, recent activity panel, and tests
-- source-aware container, source, and status filters plus a multi-select
-  assignee filter in the frontend
+- source-aware container and source filters plus multi-select status and
+  assignee filters in the frontend
 - item detail overlay with lazily-fetched body, comments, and metadata
 - inline editing of GitHub start/target dates and board Status
 - inline editing of assignees (GitHub multi-select, Jira single-select)
@@ -397,10 +397,11 @@ repositories, with Source = Jira it lists projects, and with Source = All it
 shows a combined list (Jira entries hinted). Its options are drawn from each
 item's `container` (GitHub `owner/repo` or Jira project key), and the dashboard
 cards/list update against the active container, source, status, and assignee
-selections. The container, source, and status filters are single-select, while
-the assignee filter (shared by the board and timeline views) is **multi-select**
-— a checkbox dropdown where selecting several people matches items assigned to
-**any** of them (OR), and an "Unassigned" entry matches items with no assignee.
+selections. The container and source filters are single-select, while the
+**status** and **assignee** filters (shared by the board and timeline views) are
+**multi-select** — a checkbox dropdown where selecting several values matches
+items with **any** of them (OR). The assignee dropdown also carries an
+"Unassigned" entry that matches items with no assignee.
 
 ## Launch Locally
 

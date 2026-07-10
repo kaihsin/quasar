@@ -5,7 +5,7 @@ import Filters from "./Filters";
 describe("Filters", () => {
   it("emits source, status, container, and assignee filter changes", async () => {
     const onSourceChange = jest.fn();
-    const onStatusChange = jest.fn();
+    const onStatusesChange = jest.fn();
     const onContainerChange = jest.fn();
     const onAssigneesChange = jest.fn();
 
@@ -21,11 +21,11 @@ describe("Filters", () => {
         containerLabel="Repository / Project"
         selectedContainer="all"
         selectedSource="all"
-        selectedStatus="all"
+        selectedStatuses={[]}
         selectedAssignees={[]}
         onContainerChange={onContainerChange}
         onSourceChange={onSourceChange}
-        onStatusChange={onStatusChange}
+        onStatusesChange={onStatusesChange}
         onAssigneesChange={onAssigneesChange}
       />,
     );
@@ -34,15 +34,16 @@ describe("Filters", () => {
       target: { value: "openai/platform" },
     });
     fireEvent.change(screen.getByLabelText("Source"), { target: { value: "jira" } });
-    fireEvent.change(screen.getByLabelText("Status"), { target: { value: "in progress" } });
 
-    // The assignee filter is a checkbox dropdown: open it, then toggle an option.
+    // Status and assignee are checkbox dropdowns: open, then toggle an option.
+    fireEvent.click(screen.getByLabelText("Status"));
+    fireEvent.click(screen.getByRole("checkbox", { name: "in progress" }));
     fireEvent.click(screen.getByLabelText("Assignee"));
     fireEvent.click(screen.getByRole("checkbox", { name: "Roger" }));
 
     expect(onContainerChange).toHaveBeenCalledWith("openai/platform");
     expect(onSourceChange).toHaveBeenCalledWith("jira");
-    expect(onStatusChange).toHaveBeenCalledWith("in progress");
+    expect(onStatusesChange).toHaveBeenCalledWith(["in progress"]);
     expect(onAssigneesChange).toHaveBeenCalledWith(["Roger"]);
   });
 
@@ -58,11 +59,11 @@ describe("Filters", () => {
         containerLabel="Repository"
         selectedContainer="all"
         selectedSource="all"
-        selectedStatus="all"
+        selectedStatuses={[]}
         selectedAssignees={["Kai"]}
         onContainerChange={jest.fn()}
         onSourceChange={jest.fn()}
-        onStatusChange={jest.fn()}
+        onStatusesChange={jest.fn()}
         onAssigneesChange={onAssigneesChange}
       />,
     );
@@ -86,11 +87,11 @@ describe("Filters", () => {
         containerLabel="Project"
         selectedContainer="all"
         selectedSource="jira"
-        selectedStatus="all"
+        selectedStatuses={[]}
         selectedAssignees={[]}
         onContainerChange={jest.fn()}
         onSourceChange={jest.fn()}
-        onStatusChange={jest.fn()}
+        onStatusesChange={jest.fn()}
         onAssigneesChange={jest.fn()}
       />,
     );

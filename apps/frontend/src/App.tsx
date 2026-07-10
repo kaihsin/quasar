@@ -94,7 +94,7 @@ export default function App() {
   const [isLoading, setIsLoading] = useState(false);
   const [selectedContainer, setSelectedContainer] = useState<"all" | string>("all");
   const [selectedSource, setSelectedSource] = useState<"all" | string>("all");
-  const [selectedStatus, setSelectedStatus] = useState<"all" | string>("all");
+  const [selectedStatuses, setSelectedStatuses] = useState<string[]>([]);
   const [selectedAssignees, setSelectedAssignees] = useState<string[]>([]);
   const [searchQuery, setSearchQuery] = useState("");
   const [view, setView] = useState<"board" | "timeline">("board");
@@ -192,13 +192,15 @@ export default function App() {
     if (!isSelectionAvailable(selectedSource, availableSources)) {
       setSelectedSource("all");
     }
-    if (!isSelectionAvailable(selectedStatus, availableStatuses)) {
-      setSelectedStatus("all");
-    }
+    // Prune any selected status/assignee that is no longer available. Returning
+    // the same reference when nothing changed keeps this effect (whose
+    // `available*` deps are fresh arrays each render) from looping.
+    setSelectedStatuses((prev) => {
+      const next = prev.filter((value) => availableStatuses.includes(value));
+      return next.length === prev.length ? prev : next;
+    });
     setSelectedAssignees((prev) => {
       const next = prev.filter((value) => availableAssignees.includes(value));
-      // Return the same reference when nothing was pruned so this effect (whose
-      // `availableAssignees` dep is a fresh array each render) doesn't loop.
       return next.length === prev.length ? prev : next;
     });
   }, [
@@ -208,14 +210,14 @@ export default function App() {
     availableAssignees,
     selectedContainer,
     selectedSource,
-    selectedStatus,
   ]);
 
   const searchTokens = searchQuery.trim().toLowerCase().split(/\s+/).filter(Boolean);
   const filteredItems = items.filter((item) => {
     const containerMatches = selectedContainer === "all" || item.container === selectedContainer;
     const sourceMatches = selectedSource === "all" || item.source === selectedSource;
-    const statusMatches = selectedStatus === "all" || item.status === selectedStatus;
+    const statusMatches =
+      selectedStatuses.length === 0 || selectedStatuses.includes(item.status);
     const assigneeMatches =
       selectedAssignees.length === 0 ||
       (selectedAssignees.includes(UNASSIGNED) && item.assignees.length === 0) ||
@@ -318,11 +320,11 @@ export default function App() {
           containerLabel={containerLabel}
           onContainerChange={setSelectedContainer}
           onSourceChange={setSelectedSource}
-          onStatusChange={setSelectedStatus}
+          onStatusesChange={setSelectedStatuses}
           onAssigneesChange={setSelectedAssignees}
           selectedContainer={selectedContainer}
           selectedSource={selectedSource}
-          selectedStatus={selectedStatus}
+          selectedStatuses={selectedStatuses}
           selectedAssignees={selectedAssignees}
         />
 
