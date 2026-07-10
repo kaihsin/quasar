@@ -735,106 +735,107 @@ where
         return response;
     }
 
-    // Emits a resolved source's items as their own chunk, then folds them into
-    // the accumulated set for caching and batch callers.
-    fn emit_items<F: FnMut(StreamChunk)>(emit: &mut F, items: Vec<WorkItem>, data: &mut Vec<WorkItem>) {
-        emit(StreamChunk::Items {
-            data: &items,
-            warnings: &[],
-        });
-        data.extend(items);
-    }
-    // Emits a source failure as a warning-only chunk, then records the warning.
-    fn emit_warning<F: FnMut(StreamChunk)>(
-        emit: &mut F,
-        warning: SourceWarning,
-        warnings: &mut Vec<SourceWarning>,
-    ) {
-        emit(StreamChunk::Items {
-            data: &[],
-            warnings: std::slice::from_ref(&warning),
-        });
-        warnings.push(warning);
-    }
-
-    let mut data = Vec::new();
-    let mut warnings = Vec::new();
+    // Each unit resolves one source (a GitHub repo, the GitHub fixture, a Jira
+    // query, or the Jira fixture) and yields its items + warnings. Units run on
+    // scoped threads and stream back over a channel as they finish, so a slow
+    // source (e.g. a large Jira project's date enrichment) no longer blocks the
+    // others. `emit` stays on this thread (so it needn't be Sync).
+    type Unit<'a> = Box<dyn FnOnce() -> (Vec<WorkItem>, Vec<SourceWarning>) + Send + 'a>;
+    let mut units: Vec<Unit> = Vec::new();
 
     match &state.github_source {
-        GitHubSource::Fixture(path) => match adapters::github::load_fixture_work_items(path) {
-            Ok(items) => emit_items(&mut emit, items, &mut data),
-            Err(error) => emit_warning(
-                &mut emit,
-                SourceWarning {
-                    source: WorkSource::GitHub,
-                    message: error.to_string(),
-                },
-                &mut warnings,
-            ),
-        },
+        GitHubSource::Fixture(path) => units.push(Box::new(move || {
+            match adapters::github::load_fixture_work_items(path) {
+                Ok(items) => (items, Vec::new()),
+                Err(error) => (
+                    Vec::new(),
+                    vec![SourceWarning { source: WorkSource::GitHub, message: error.to_string() }],
+                ),
+            }
+        })),
         GitHubSource::Cli => {
             if state.github_repos.is_empty() {
-                emit_warning(
-                    &mut emit,
-                    SourceWarning {
-                        source: WorkSource::GitHub,
-                        message: "No GitHub repos configured for CLI mode".to_string(),
-                    },
-                    &mut warnings,
-                );
+                units.push(Box::new(|| {
+                    (
+                        Vec::new(),
+                        vec![SourceWarning {
+                            source: WorkSource::GitHub,
+                            message: "No GitHub repos configured for CLI mode".to_string(),
+                        }],
+                    )
+                }));
             } else {
                 for repo in &state.github_repos {
-                    match adapters::github::load_work_items_with_runner(
-                        state.runner.as_ref(),
-                        repo,
-                        state.github_project.as_ref(),
-                    ) {
-                        Ok(items) => emit_items(&mut emit, items, &mut data),
-                        Err(error) => emit_warning(
-                            &mut emit,
-                            SourceWarning {
-                                source: WorkSource::GitHub,
-                                message: format!("GitHub repo {repo} failed: {error}"),
-                            },
-                            &mut warnings,
-                        ),
-                    }
+                    units.push(Box::new(move || {
+                        match adapters::github::load_work_items_with_runner(
+                            state.runner.as_ref(),
+                            repo,
+                            state.github_project.as_ref(),
+                        ) {
+                            Ok(items) => (items, Vec::new()),
+                            Err(error) => (
+                                Vec::new(),
+                                vec![SourceWarning {
+                                    source: WorkSource::GitHub,
+                                    message: format!("GitHub repo {repo} failed: {error}"),
+                                }],
+                            ),
+                        }
+                    }));
                 }
             }
         }
     }
 
     match &state.jira_source {
-        JiraSource::Fixture(path) => match adapters::jira::load_fixture_work_items(path, &state.jira_base_url) {
-            Ok(items) => emit_items(&mut emit, items, &mut data),
-            Err(error) => emit_warning(
-                &mut emit,
-                SourceWarning {
-                    source: WorkSource::Jira,
-                    message: error.to_string(),
-                },
-                &mut warnings,
-            ),
-        },
-        // One `acli` query per configured Jira project, emitted as its own chunk
-        // so each project streams independently (mirroring the GitHub repo loop).
-        // One project failing surfaces a warning without sinking the others.
+        JiraSource::Fixture(path) => units.push(Box::new(move || {
+            match adapters::jira::load_fixture_work_items(path, &state.jira_base_url) {
+                Ok(items) => (items, Vec::new()),
+                Err(error) => (
+                    Vec::new(),
+                    vec![SourceWarning { source: WorkSource::Jira, message: error.to_string() }],
+                ),
+            }
+        })),
         JiraSource::Cli => {
             for jql in &state.jira_queries {
-                match adapters::jira::load_work_items_with_runner(state.runner.as_ref(), jql, &state.jira_base_url, state.date_cache.as_ref(), now) {
-                    Ok(items) => emit_items(&mut emit, items, &mut data),
-                    Err(error) => emit_warning(
-                        &mut emit,
-                        SourceWarning {
-                            source: WorkSource::Jira,
-                            message: error.to_string(),
-                        },
-                        &mut warnings,
-                    ),
-                }
+                units.push(Box::new(move || {
+                    match adapters::jira::load_work_items_with_runner(
+                        state.runner.as_ref(),
+                        jql,
+                        &state.jira_base_url,
+                        state.date_cache.as_ref(),
+                        now,
+                    ) {
+                        Ok(items) => (items, Vec::new()),
+                        Err(error) => (
+                            Vec::new(),
+                            vec![SourceWarning { source: WorkSource::Jira, message: error.to_string() }],
+                        ),
+                    }
+                }));
             }
         }
     }
+
+    let mut data: Vec<WorkItem> = Vec::new();
+    let mut warnings: Vec<SourceWarning> = Vec::new();
+    let (tx, rx) = std::sync::mpsc::channel::<(Vec<WorkItem>, Vec<SourceWarning>)>();
+    std::thread::scope(|scope| {
+        for unit in units {
+            let tx = tx.clone();
+            scope.spawn(move || {
+                let _ = tx.send(unit());
+            });
+        }
+        drop(tx);
+        // Receive each unit's result as it completes and emit its chunk immediately.
+        for (items, warns) in &rx {
+            emit(StreamChunk::Items { data: &items, warnings: &warns });
+            data.extend(items);
+            warnings.extend(warns);
+        }
+    });
 
     data.sort_by(|left, right| left.id.cmp(&right.id));
     // A ticket can match multiple queries (e.g. a board project and the person
