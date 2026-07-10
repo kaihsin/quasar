@@ -47,11 +47,14 @@ pub struct AppState {
     pub github_repos: Vec<String>,
     pub jira_queries: Vec<String>,
     pub jira_base_url: String,
+    pub jira_people: Vec<String>,
+    pub jira_jql: Option<String>,
     pub github_project: Option<GitHubProject>,
     pub jira_config: Option<JiraConfig>,
 }
 
 impl AppState {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         github_source: GitHubSource,
         jira_source: JiraSource,
@@ -59,6 +62,8 @@ impl AppState {
         github_repos: Vec<String>,
         jira_queries: Vec<String>,
         jira_base_url: String,
+        jira_people: Vec<String>,
+        jira_jql: Option<String>,
         github_project: Option<GitHubProject>,
         jira_config: Option<JiraConfig>,
     ) -> Self {
@@ -72,6 +77,8 @@ impl AppState {
             github_repos,
             jira_queries,
             jira_base_url,
+            jira_people,
+            jira_jql,
             github_project,
             jira_config,
         }
@@ -93,6 +100,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/work-item-detail", get(work_item_detail))
         .route("/api/work-item-field", patch(update_work_item_field))
         .route("/api/work-item-assignees", patch(update_work_item_assignees))
+        .route("/api/people", get(people))
+        .route("/api/person-work-items", get(person_work_items))
         .with_state(state)
 }
 
@@ -561,6 +570,103 @@ fn set_work_item_assignees(
     Ok(())
 }
 
+#[derive(Serialize)]
+struct PeopleResponse {
+    users: Vec<String>,
+}
+
+async fn people(State(state): State<AppState>) -> Json<PeopleResponse> {
+    Json(PeopleResponse {
+        users: state.jira_people.clone(),
+    })
+}
+
+#[derive(Deserialize)]
+struct PersonQuery {
+    user: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct PersonWorkItemsResponse {
+    user: String,
+    account_id: Option<String>,
+    created_by: Vec<WorkItem>,
+    mentioned: Vec<WorkItem>,
+}
+
+async fn person_work_items(
+    State(state): State<AppState>,
+    Query(query): Query<PersonQuery>,
+) -> Result<Json<PersonWorkItemsResponse>, (StatusCode, String)> {
+    fetch_person_work_items(&state, &query.user)
+        .map(Json)
+        .map_err(|error| (error.status, error.message))
+}
+
+fn fetch_person_work_items(
+    state: &AppState,
+    user: &str,
+) -> Result<PersonWorkItemsResponse, DetailError> {
+    if !state.jira_people.iter().any(|u| u == user) {
+        return Err(DetailError {
+            status: StatusCode::BAD_REQUEST,
+            message: format!("unknown configured person: {user}"),
+        });
+    }
+    if matches!(state.jira_source, JiraSource::Fixture(_)) {
+        return Ok(PersonWorkItemsResponse {
+            user: user.to_string(),
+            account_id: None,
+            created_by: Vec::new(),
+            mentioned: Vec::new(),
+        });
+    }
+
+    let cache_key = format!("person:{user}");
+    let now = Instant::now();
+    if let CacheOutcome::Hit(payload) = state.cache.get(&cache_key, now) {
+        if let Ok(cached) = serde_json::from_str::<PersonWorkItemsResponse>(&payload) {
+            return Ok(cached);
+        }
+    }
+
+    let runner = state.runner.as_ref();
+    let account_id = adapters::jira::fetch_account_id_via_reporter(runner, user).map(|(id, _)| id);
+    let queries = crate::config::compose_person_queries(
+        user,
+        account_id.as_deref(),
+        state.jira_jql.as_deref(),
+    );
+
+    let created_by =
+        adapters::jira::search_work_items(runner, &queries.created_by, &state.jira_base_url)
+            .map_err(|error| DetailError {
+                status: StatusCode::BAD_GATEWAY,
+                message: error.to_string(),
+            })?;
+
+    // Mentioned is best-effort: a failure there must not sink created-by.
+    let mut mentioned = match &queries.mentioned {
+        Some(jql) => adapters::jira::search_work_items(runner, jql, &state.jira_base_url)
+            .unwrap_or_default(),
+        None => Vec::new(),
+    };
+    let created_ids: std::collections::HashSet<&str> =
+        created_by.iter().map(|item| item.id.as_str()).collect();
+    mentioned.retain(|item| !created_ids.contains(item.id.as_str()));
+
+    let response = PersonWorkItemsResponse {
+        user: user.to_string(),
+        account_id,
+        created_by,
+        mentioned,
+    };
+    if let Ok(payload) = serde_json::to_string(&response) {
+        state.cache.insert(&cache_key, payload, now);
+    }
+    Ok(response)
+}
+
 fn is_iso_date(value: &str) -> bool {
     let bytes = value.as_bytes();
     bytes.len() == 10
@@ -837,6 +943,8 @@ mod tests {
             github_repos: Vec::new(),
             jira_queries: vec!["order by updated desc".to_string()],
             jira_base_url: "https://quera.atlassian.net".to_string(),
+            jira_people: Vec::new(),
+            jira_jql: None,
             github_project: None,
             jira_config: None,
         }
@@ -1074,6 +1182,8 @@ mod tests {
             github_repos: vec!["openai/quasar".to_string(), "rust-lang/rust".to_string()],
             jira_queries: vec!["order by updated desc".to_string()],
             jira_base_url: "https://quera.atlassian.net".to_string(),
+            jira_people: Vec::new(),
+            jira_jql: None,
             github_project: None,
             jira_config: None,
         };
@@ -1132,9 +1242,101 @@ mod tests {
             github_repos: Vec::new(),
             jira_queries,
             jira_base_url: "https://quera.atlassian.net".to_string(),
+            jira_people: Vec::new(),
+            jira_jql: None,
             github_project: None,
             jira_config: None,
         }
+    }
+
+    // Mirrors `jira_cli_state` but with `JiraSource::Cli` and configured people,
+    // for exercising the People-page person-work-items path.
+    fn jira_cli_state_people<R: CommandRunner + 'static>(
+        runner: R,
+        people: Vec<String>,
+    ) -> AppState {
+        AppState {
+            github_source: GitHubSource::Cli,
+            jira_source: JiraSource::Cli,
+            cache: Arc::new(ResponseCache::new(Duration::from_secs(30))),
+            runner: Arc::new(runner),
+            github_repos: Vec::new(),
+            jira_queries: Vec::new(),
+            jira_base_url: "https://quera.atlassian.net".to_string(),
+            jira_people: people,
+            jira_jql: None,
+            github_project: None,
+            jira_config: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn people_endpoint_lists_configured_users() {
+        let mut state = app_state(fixture_path("github"), fixture_path("jira"));
+        state.jira_people = vec!["a@x".to_string(), "b@x".to_string()];
+        let app = router(state);
+        let response = app
+            .oneshot(Request::builder().uri("/api/people").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let payload: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(payload["users"][0], "a@x");
+        assert_eq!(payload["users"][1], "b@x");
+    }
+
+    #[test]
+    fn person_work_items_rejects_unconfigured_user() {
+        let mut state = app_state(fixture_path("github"), fixture_path("jira"));
+        state.jira_people = vec!["a@x".to_string()];
+        let error = super::fetch_person_work_items(&state, "stranger@x")
+            .expect_err("unconfigured user should be rejected");
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn person_work_items_fixture_mode_returns_empty() {
+        let mut state = app_state(fixture_path("github"), fixture_path("jira"));
+        state.jira_people = vec!["a@x".to_string()];
+        let result = super::fetch_person_work_items(&state, "a@x").expect("ok");
+        assert!(result.created_by.is_empty() && result.mentioned.is_empty());
+        assert_eq!(result.user, "a@x");
+        assert_eq!(result.account_id, None);
+    }
+
+    #[test]
+    fn person_work_items_dedupes_mentioned_against_created_by() {
+        // Cli runner answering: (a) reporter --limit 1 resolve -> accountId acc:1,
+        // (b) created-by search -> SSW-1, (c) mentioned text~ search -> SSW-1 + SSW-2.
+        // Expect created_by=[SSW-1], mentioned=[SSW-2] (SSW-1 removed as dup).
+        struct Runner;
+        impl CommandRunner for Runner {
+            fn run(&self, _p: &str, args: &[&str]) -> CommandResult<String> {
+                let jql = args
+                    .windows(2)
+                    .find_map(|w| (w[0] == "--jql").then_some(w[1]))
+                    .unwrap_or("");
+                let has_limit = args.iter().any(|a| *a == "--limit");
+                if jql.starts_with("reporter =") && has_limit {
+                    Ok(r#"[{"key":"SSW-1","fields":{"reporter":{"accountId":"acc:1","displayName":"Ann"}}}]"#.to_string())
+                } else if jql.starts_with("reporter =") {
+                    Ok(jira_search_payload("SSW-1", "created"))
+                } else {
+                    // text ~ "acc:1" mentioned search -> two issues
+                    Ok(format!(
+                        r#"[{{"key":"SSW-1","fields":{{"summary":"created","status":{{"name":"To Do"}}}}}},{{"key":"SSW-2","fields":{{"summary":"mention","status":{{"name":"To Do"}}}}}}]"#
+                    ))
+                }
+            }
+        }
+        let state = jira_cli_state_people(Runner, vec!["a@x".to_string()]);
+        let result = super::fetch_person_work_items(&state, "a@x").expect("ok");
+        let created: Vec<&str> = result.created_by.iter().map(|i| i.external_id.as_str()).collect();
+        let mentioned: Vec<&str> = result.mentioned.iter().map(|i| i.external_id.as_str()).collect();
+        assert_eq!(created, vec!["SSW-1"]);
+        assert_eq!(mentioned, vec!["SSW-2"]);
+        assert_eq!(result.account_id.as_deref(), Some("acc:1"));
     }
 
     #[test]
@@ -1504,6 +1706,8 @@ mod tests {
             github_repos: vec!["openai/quasar".to_string()],
             jira_queries: vec!["order by updated desc".to_string()],
             jira_base_url: "https://quera.atlassian.net".to_string(),
+            jira_people: Vec::new(),
+            jira_jql: None,
             github_project: Some(GitHubProject {
                 owner: "QuEraComputing".into(),
                 number: 18,
@@ -1597,6 +1801,8 @@ mod tests {
             github_repos: vec!["openai/quasar".to_string()],
             jira_queries: vec!["order by updated desc".to_string()],
             jira_base_url: "https://quera.atlassian.net".to_string(),
+            jira_people: Vec::new(),
+            jira_jql: None,
             github_project: Some(GitHubProject {
                 owner: "QuEraComputing".into(),
                 number: 18,
@@ -1645,6 +1851,8 @@ mod tests {
             github_repos: Vec::new(),
             jira_queries: vec!["order by updated desc".to_string()],
             jira_base_url: "https://quera.atlassian.net".to_string(),
+            jira_people: Vec::new(),
+            jira_jql: None,
             github_project: None,
             jira_config: None,
         };
@@ -1695,6 +1903,8 @@ mod tests {
             github_repos: vec!["o/r".to_string()],
             jira_queries: vec!["order by updated desc".to_string()],
             jira_base_url: "https://quera.atlassian.net".to_string(),
+            jira_people: Vec::new(),
+            jira_jql: None,
             github_project: Some(GitHubProject {
                 owner: "QuEraComputing".into(),
                 number: 18,
@@ -1745,6 +1955,8 @@ mod tests {
             github_repos: Vec::new(),
             jira_queries: vec!["order by updated desc".to_string()],
             jira_base_url: "https://quera.atlassian.net".to_string(),
+            jira_people: Vec::new(),
+            jira_jql: None,
             github_project: None,
             jira_config: jira,
         }
@@ -1932,6 +2144,8 @@ mod tests {
             github_repos: vec!["openai/quasar".to_string()],
             jira_queries: vec!["order by updated desc".to_string()],
             jira_base_url: "https://quera.atlassian.net".to_string(),
+            jira_people: Vec::new(),
+            jira_jql: None,
             github_project: None,
             jira_config: None,
         };
