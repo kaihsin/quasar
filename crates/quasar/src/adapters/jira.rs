@@ -299,7 +299,7 @@ fn normalize_issue_detail(raw: &str) -> AdapterResult<WorkItemDetail> {
         title: fields.summary,
         url,
         status: fields.status.name,
-        assignee: fields.assignee.map(|person| person.display_name),
+        assignees: fields.assignee.map(|person| person.display_name).into_iter().collect(),
         labels: fields.labels,
         priority: fields.priority.map(|priority| priority.name),
         created_at: fields.created.unwrap_or_default(),
@@ -344,7 +344,7 @@ fn normalize_issue(issue: JiraIssue) -> WorkItem {
         title: fields.summary,
         url,
         status: fields.status.name,
-        assignee: fields.assignee.map(|person| person.display_name),
+        assignees: fields.assignee.map(|person| person.display_name).into_iter().collect(),
         labels: fields.labels,
         priority: fields.priority.map(|priority| priority.name),
         created_at: fields.created.unwrap_or_default(),
@@ -648,7 +648,7 @@ mod tests {
         assert_eq!(items[0].container, "ABC");
         assert_eq!(items[0].url, "https://quera.atlassian.net/browse/ABC-42");
         assert_eq!(items[0].status, "In Progress");
-        assert_eq!(items[0].assignee.as_deref(), Some("Kai Hsin Wu"));
+        assert_eq!(items[0].assignees, vec!["Kai Hsin Wu".to_string()]);
     }
 
     #[test]

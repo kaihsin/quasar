@@ -340,7 +340,7 @@ fn normalize_issue(issue: GitHubIssue, repo: Option<&str>) -> WorkItem {
         title: issue.title,
         url: issue.url,
         status: issue.state.to_lowercase(),
-        assignee: issue.assignees.into_iter().next().map(|user| user.login),
+        assignees: issue.assignees.into_iter().map(|user| user.login).collect(),
         labels: issue.labels.into_iter().map(|label| label.name).collect(),
         priority: None,
         created_at: issue.created_at,
