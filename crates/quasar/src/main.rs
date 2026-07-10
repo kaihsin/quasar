@@ -20,6 +20,7 @@ fn build_app_state(config: &RuntimeConfig) -> AppState {
             config.cache_ttl_secs,
             config.github_repos.clone(),
             config.jira_queries.clone(),
+            config.jira_base_url.clone(),
             config.github_project.clone(),
             config.jira.clone(),
         ),
@@ -29,6 +30,7 @@ fn build_app_state(config: &RuntimeConfig) -> AppState {
             config.cache_ttl_secs,
             config.github_repos.clone(),
             config.jira_queries.clone(),
+            config.jira_base_url.clone(),
             config.github_project.clone(),
             config.jira.clone(),
         ),
@@ -131,6 +133,7 @@ jira_jql = "project = TEAM order by updated desc"
                 mode: ServerMode::Fixtures,
                 github_repos: vec!["openai/quasar".to_string(), "rust-lang/rust".to_string()],
                 jira_queries: vec!["project = TEAM order by updated desc".to_string()],
+                jira_base_url: "https://quera.atlassian.net".to_string(),
                 github_project: None,
                 jira: None,
             }

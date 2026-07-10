@@ -11,10 +11,6 @@ use crate::domain::{Comment, WorkItem, WorkItemDetail, WorkSource};
 
 type AdapterResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
-/// Base URL for constructing browser-facing work item links. `acli` only reports
-/// the internal REST `self` URL, so we build the public `/browse/KEY` link here.
-const JIRA_BROWSE_BASE: &str = "https://quera.atlassian.net/browse";
-
 /// Planning-date custom fields on this Jira site's board:
 /// `customfield_10022` = "Target start", `customfield_10023` = "Target end".
 /// Keep these in sync with the `#[serde(rename = ...)]` on `JiraViewFields`.
@@ -67,14 +63,15 @@ struct JiraPriority {
     name: String,
 }
 
-pub fn load_fixture_work_items(path: &Path) -> AdapterResult<Vec<WorkItem>> {
+pub fn load_fixture_work_items(path: &Path, base_url: &str) -> AdapterResult<Vec<WorkItem>> {
     let raw = fs::read_to_string(path)?;
-    normalize_work_items(&raw)
+    normalize_work_items(&raw, base_url)
 }
 
 pub fn load_work_items_with_runner(
     runner: &dyn CommandRunner,
     jql: &str,
+    base_url: &str,
 ) -> AdapterResult<Vec<WorkItem>> {
     let raw = runner
         .run(
@@ -95,7 +92,7 @@ pub fn load_work_items_with_runner(
         )
         .map_err(|error| -> Box<dyn std::error::Error + Send + Sync> { Box::new(error) })?;
 
-    let mut items = normalize_work_items(&raw)?;
+    let mut items = normalize_work_items(&raw, base_url)?;
     enrich_planning_dates(runner, &mut items);
     Ok(items)
 }
@@ -242,12 +239,16 @@ fn fetch_issue_dates(runner: &dyn CommandRunner, key: &str) -> Option<(String, S
     ))
 }
 
-pub fn load_fixture_issue_detail(path: &Path) -> AdapterResult<WorkItemDetail> {
+pub fn load_fixture_issue_detail(path: &Path, base_url: &str) -> AdapterResult<WorkItemDetail> {
     let raw = fs::read_to_string(path)?;
-    normalize_issue_detail(&raw)
+    normalize_issue_detail(&raw, base_url)
 }
 
-pub fn fetch_issue_detail(runner: &dyn CommandRunner, key: &str) -> AdapterResult<WorkItemDetail> {
+pub fn fetch_issue_detail(
+    runner: &dyn CommandRunner,
+    key: &str,
+    base_url: &str,
+) -> AdapterResult<WorkItemDetail> {
     let raw = runner
         .run(
             "acli",
@@ -263,14 +264,14 @@ pub fn fetch_issue_detail(runner: &dyn CommandRunner, key: &str) -> AdapterResul
         )
         .map_err(|error| -> Box<dyn std::error::Error + Send + Sync> { Box::new(error) })?;
 
-    normalize_issue_detail(&raw)
+    normalize_issue_detail(&raw, base_url)
 }
 
-fn normalize_issue_detail(raw: &str) -> AdapterResult<WorkItemDetail> {
+fn normalize_issue_detail(raw: &str, base_url: &str) -> AdapterResult<WorkItemDetail> {
     let issue: JiraDetailIssue = serde_json::from_str(raw)?;
     let fields = issue.fields;
     let external_id = issue.key;
-    let url = format!("{JIRA_BROWSE_BASE}/{external_id}");
+    let url = format!("{}/browse/{external_id}", base_url.trim_end_matches('/'));
     let container = external_id
         .split_once('-')
         .map(|(project_key, _)| project_key.to_string())
@@ -333,14 +334,17 @@ fn normalize_issue_detail(raw: &str) -> AdapterResult<WorkItemDetail> {
     })
 }
 
-fn normalize_work_items(raw: &str) -> AdapterResult<Vec<WorkItem>> {
+fn normalize_work_items(raw: &str, base_url: &str) -> AdapterResult<Vec<WorkItem>> {
     let issues: Vec<JiraIssue> = serde_json::from_str(raw)?;
-    Ok(issues.into_iter().map(normalize_issue).collect())
+    Ok(issues
+        .into_iter()
+        .map(|issue| normalize_issue(issue, base_url))
+        .collect())
 }
 
-fn normalize_issue(issue: JiraIssue) -> WorkItem {
+fn normalize_issue(issue: JiraIssue, base_url: &str) -> WorkItem {
     let external_id = issue.key;
-    let url = format!("{JIRA_BROWSE_BASE}/{external_id}");
+    let url = format!("{}/browse/{external_id}", base_url.trim_end_matches('/'));
     // Project key is the prefix of the issue key (e.g. "SSW" from "SSW-1131");
     // `search` does not return the project object.
     let container = external_id
@@ -575,6 +579,8 @@ mod tests {
 
     use super::{load_fixture_work_items, load_work_items_with_runner};
 
+    const TEST_BASE: &str = "https://quera.atlassian.net";
+
     struct MockCommandRunner {
         calls: Mutex<Vec<(String, Vec<String>)>>,
         result: CommandResult<String>,
@@ -627,7 +633,7 @@ mod tests {
 
     #[test]
     fn jira_fixture_detail_normalizes_body_and_comments() {
-        let detail = super::load_fixture_issue_detail(&detail_fixture_path())
+        let detail = super::load_fixture_issue_detail(&detail_fixture_path(), TEST_BASE)
             .expect("detail fixture should load");
 
         assert_eq!(detail.item.id, "jira:ABC-42");
@@ -648,7 +654,8 @@ mod tests {
         let payload = std::fs::read_to_string(detail_fixture_path()).expect("fixture should read");
         let runner = MockCommandRunner::success(&payload);
 
-        let detail = super::fetch_issue_detail(&runner, "ABC-42").expect("detail should load");
+        let detail =
+            super::fetch_issue_detail(&runner, "ABC-42", TEST_BASE).expect("detail should load");
 
         let calls = runner
             .calls
@@ -699,7 +706,7 @@ mod tests {
 
     #[test]
     fn jira_fixture_normalizes_into_work_items() {
-        let items = load_fixture_work_items(&fixture_path()).expect("fixture should load");
+        let items = load_fixture_work_items(&fixture_path(), TEST_BASE).expect("fixture should load");
 
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].id, "jira:ABC-42");
@@ -716,7 +723,7 @@ mod tests {
         let payload = std::fs::read_to_string(fixture_path()).expect("fixture should read");
         let runner = MockCommandRunner::success(&payload);
 
-        let items = load_work_items_with_runner(&runner, "order by updated desc")
+        let items = load_work_items_with_runner(&runner, "order by updated desc", TEST_BASE)
             .expect("runner payload should load");
 
         let calls = runner
@@ -780,7 +787,7 @@ mod tests {
                 .to_string(),
         };
 
-        let items = load_work_items_with_runner(&runner, "order by updated desc")
+        let items = load_work_items_with_runner(&runner, "order by updated desc", TEST_BASE)
             .expect("runner payload should load");
 
         assert_eq!(items.len(), 1);
@@ -792,10 +799,17 @@ mod tests {
     fn jira_runner_propagates_cli_failures() {
         let runner = MockCommandRunner::failure("jira unavailable");
 
-        let error = load_work_items_with_runner(&runner, "order by updated desc")
+        let error = load_work_items_with_runner(&runner, "order by updated desc", TEST_BASE)
             .expect_err("runner should fail");
 
         assert!(error.to_string().contains("jira unavailable"));
+    }
+
+    #[test]
+    fn jira_browse_url_uses_provided_base() {
+        let items = load_fixture_work_items(&fixture_path(), "https://acme.atlassian.net/")
+            .expect("fixture should load");
+        assert_eq!(items[0].url, "https://acme.atlassian.net/browse/ABC-42");
     }
 
     fn test_jira_config() -> crate::config::JiraConfig {

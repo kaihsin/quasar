@@ -46,6 +46,7 @@ pub struct AppState {
     pub runner: Arc<dyn CommandRunner>,
     pub github_repos: Vec<String>,
     pub jira_queries: Vec<String>,
+    pub jira_base_url: String,
     pub github_project: Option<GitHubProject>,
     pub jira_config: Option<JiraConfig>,
 }
@@ -57,6 +58,7 @@ impl AppState {
         cache_ttl_secs: u64,
         github_repos: Vec<String>,
         jira_queries: Vec<String>,
+        jira_base_url: String,
         github_project: Option<GitHubProject>,
         jira_config: Option<JiraConfig>,
     ) -> Self {
@@ -69,6 +71,7 @@ impl AppState {
             runner: Arc::new(SystemCommandRunner),
             github_repos,
             jira_queries,
+            jira_base_url,
             github_project,
             jira_config,
         }
@@ -245,11 +248,11 @@ fn fetch_work_item_detail(state: &AppState, id: &str) -> Result<WorkItemDetail, 
         let result = match &state.jira_source {
             JiraSource::Fixture(path) => {
                 let detail_path = path.with_file_name("issue-detail.json");
-                adapters::jira::load_fixture_issue_detail(&detail_path)
+                adapters::jira::load_fixture_issue_detail(&detail_path, &state.jira_base_url)
             }
             JiraSource::Cli => {
                 let mut detail =
-                    match adapters::jira::fetch_issue_detail(state.runner.as_ref(), key) {
+                    match adapters::jira::fetch_issue_detail(state.runner.as_ref(), key, &state.jira_base_url) {
                         Ok(detail) => detail,
                         Err(error) => {
                             return Err(DetailError {
@@ -688,7 +691,7 @@ where
     }
 
     match &state.jira_source {
-        JiraSource::Fixture(path) => match adapters::jira::load_fixture_work_items(path) {
+        JiraSource::Fixture(path) => match adapters::jira::load_fixture_work_items(path, &state.jira_base_url) {
             Ok(items) => emit_items(&mut emit, items, &mut data),
             Err(error) => emit_warning(
                 &mut emit,
@@ -704,7 +707,7 @@ where
         // One project failing surfaces a warning without sinking the others.
         JiraSource::Cli => {
             for jql in &state.jira_queries {
-                match adapters::jira::load_work_items_with_runner(state.runner.as_ref(), jql) {
+                match adapters::jira::load_work_items_with_runner(state.runner.as_ref(), jql, &state.jira_base_url) {
                     Ok(items) => emit_items(&mut emit, items, &mut data),
                     Err(error) => emit_warning(
                         &mut emit,
@@ -830,6 +833,7 @@ mod tests {
             runner: Arc::new(crate::clients::command_runner::SystemCommandRunner),
             github_repos: Vec::new(),
             jira_queries: vec!["order by updated desc".to_string()],
+            jira_base_url: "https://quera.atlassian.net".to_string(),
             github_project: None,
             jira_config: None,
         }
@@ -1066,6 +1070,7 @@ mod tests {
             ]))),
             github_repos: vec!["openai/quasar".to_string(), "rust-lang/rust".to_string()],
             jira_queries: vec!["order by updated desc".to_string()],
+            jira_base_url: "https://quera.atlassian.net".to_string(),
             github_project: None,
             jira_config: None,
         };
@@ -1123,6 +1128,7 @@ mod tests {
             runner: Arc::new(runner),
             github_repos: Vec::new(),
             jira_queries,
+            jira_base_url: "https://quera.atlassian.net".to_string(),
             github_project: None,
             jira_config: None,
         }
@@ -1472,6 +1478,7 @@ mod tests {
             }),
             github_repos: vec!["openai/quasar".to_string()],
             jira_queries: vec!["order by updated desc".to_string()],
+            jira_base_url: "https://quera.atlassian.net".to_string(),
             github_project: Some(GitHubProject {
                 owner: "QuEraComputing".into(),
                 number: 18,
@@ -1564,6 +1571,7 @@ mod tests {
             }),
             github_repos: vec!["openai/quasar".to_string()],
             jira_queries: vec!["order by updated desc".to_string()],
+            jira_base_url: "https://quera.atlassian.net".to_string(),
             github_project: Some(GitHubProject {
                 owner: "QuEraComputing".into(),
                 number: 18,
@@ -1611,6 +1619,7 @@ mod tests {
             runner: Arc::new(MockCommandRunner::new(HashMap::new())),
             github_repos: Vec::new(),
             jira_queries: vec!["order by updated desc".to_string()],
+            jira_base_url: "https://quera.atlassian.net".to_string(),
             github_project: None,
             jira_config: None,
         };
@@ -1660,6 +1669,7 @@ mod tests {
             runner: Arc::new(Runner),
             github_repos: vec!["o/r".to_string()],
             jira_queries: vec!["order by updated desc".to_string()],
+            jira_base_url: "https://quera.atlassian.net".to_string(),
             github_project: Some(GitHubProject {
                 owner: "QuEraComputing".into(),
                 number: 18,
@@ -1709,6 +1719,7 @@ mod tests {
             runner,
             github_repos: Vec::new(),
             jira_queries: vec!["order by updated desc".to_string()],
+            jira_base_url: "https://quera.atlassian.net".to_string(),
             github_project: None,
             jira_config: jira,
         }
@@ -1895,6 +1906,7 @@ mod tests {
             }),
             github_repos: vec!["openai/quasar".to_string()],
             jira_queries: vec!["order by updated desc".to_string()],
+            jira_base_url: "https://quera.atlassian.net".to_string(),
             github_project: None,
             jira_config: None,
         };
