@@ -122,10 +122,21 @@ github_repos = [
   "rust-lang/rust",
   "tokio-rs/tokio",
 ]
+# Optional: the Jira site domain used to build work-item browse links.
+# Defaults to https://quera.atlassian.net. Set it to match the site `acli`
+# is authenticated to (and the write-path [jira].base_url below).
+jira_base_url = "https://quera.atlassian.net"
+
 # Which Jira project(s) to pull work items from. Keys compose a
 # `project in (...)` clause; ordering defaults to `ORDER BY updated DESC`.
 [jira_board]
 projects = ["ENG"]
+
+# Optional: pull every ticket assigned to OR created by these people, across
+# all projects on the site (not just [jira_board]). Emails must be non-empty
+# and contain no whitespace or double-quote characters.
+[jira_people]
+users = ["alice@example.com", "bob@example.com"]
 
 # Optional: an extra raw JQL filter AND'd with the [jira_board] selection above.
 # Its own `ORDER BY`, if present, becomes the query's ordering. Omit [jira_board]
@@ -225,6 +236,23 @@ pieces:
   query, so it narrows the results (e.g. exclude Done). A single trailing
   `ORDER BY` is applied: the raw clause's own `ORDER BY` if it has one, otherwise
   the default `ORDER BY updated DESC`.
+- **`[jira_people]`** (optional) — `users = ["email", ...]` pulls every ticket
+  **assigned to** OR **created by** the listed people across **all** projects on
+  the site (not just those in `[jira_board]`). Mechanically it appends **one**
+  extra `acli` query, `(assignee in (...) OR reporter in (...))`, to the
+  per-project fan-out, streamed as its own chunk. Emails are validated
+  (non-empty, no whitespace, no double-quote). Its results are merged with the
+  board results and **de-duplicated by issue key**, so a ticket that is both in
+  a configured project and matches a person appears **once**. `jira_jql` is
+  AND'd into the person query too, so set e.g. `jira_jql = "statusCategory != Done"`
+  to bound it — "all tickets related to a person" can be large (a prolific
+  reporter can have hundreds), and each fetched item still costs a per-issue
+  `view` call for planning-date enrichment, so a large person set slows refresh.
+
+The browse link on each Jira card (and the `↗` original link) is built from
+**`jira_base_url`** (top-level, optional, default `https://quera.atlassian.net`).
+Set it to match the site `acli` is authenticated to; it should also match the
+write-path `[jira].base_url`, which remains a separate key with the same default.
 
 Composition examples (each line is a separate `acli` query):
 
@@ -249,6 +277,21 @@ projects = ["SSW", "ENG"]
 
 # escape hatch: no [jira_board], raw JQL is the sole query, verbatim
 jira_jql = "project = SSW AND statusCategory != Done ORDER BY updated DESC"
+
+# [jira_people] -> one extra cross-project query, merged + deduped by key
+[jira_board]
+projects = ["SSW", "ENG"]
+[jira_people]
+users = ["alice@example.com", "bob@example.com"]
+# -> project = SSW ORDER BY updated DESC
+# -> project = ENG ORDER BY updated DESC
+# -> (assignee in ("alice@example.com","bob@example.com") OR reporter in ("alice@example.com","bob@example.com")) ORDER BY updated DESC
+
+# jira_jql bounds the person query too (AND'd in)
+jira_jql = "statusCategory != Done"
+[jira_people]
+users = ["alice@example.com"]
+# -> ((assignee in ("alice@example.com") OR reporter in ("alice@example.com")) AND (statusCategory != Done)) ORDER BY updated DESC
 ```
 
 To combine boards with a filter, `[jira_board]` selects the project(s) (union)
@@ -380,6 +423,11 @@ Implemented now:
 
 - backend config loading from `~/.config/quasar/config.toml`
 - GitHub fan-out across multiple configured repositories
+- Jira per-project fan-out plus an optional `[jira_people]` cross-project query
+  (assignee OR reporter across all projects), merged with the board results and
+  de-duplicated by issue key
+- configurable `jira_base_url` for Jira browse links (default
+  `https://quera.atlassian.net`)
 - fixture-backed and CLI-backed adapter paths for GitHub and Jira
 - short-lived in-memory caching for API responses
 - unified work-item rendering with explicit repo metadata in the payload
