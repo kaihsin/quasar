@@ -150,7 +150,7 @@ export default function ItemDetailModal({
                   )}
                 </dd>
                 <dt>Assignee</dt>
-                <dd>{item.assignee ?? "Unassigned"}</dd>
+                <dd>{item.assignees.length ? item.assignees.join(", ") : "Unassigned"}</dd>
                 <dt>Author</dt>
                 <dd>{item.author ?? "—"}</dd>
                 {item.priority ? (

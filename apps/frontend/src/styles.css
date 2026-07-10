@@ -1009,3 +1009,10 @@ button {
   background: #fff;
   color: inherit;
 }
+.avatar-stack {
+  display: inline-flex;
+  align-items: center;
+}
+.avatar-stack .avatar:not(:first-child) {
+  margin-left: -6px;
+}

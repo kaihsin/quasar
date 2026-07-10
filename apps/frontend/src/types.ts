@@ -12,7 +12,7 @@ export interface WorkItem {
   title: string;
   url: string;
   status: string;
-  assignee: string | null;
+  assignees: string[];
   labels: string[];
   priority: string | null;
   created_at: string;

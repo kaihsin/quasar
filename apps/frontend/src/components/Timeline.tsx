@@ -1,5 +1,5 @@
 import type { WorkItem } from "../types";
-import Avatar from "./Avatar";
+import AssigneeAvatars from "./AssigneeAvatars";
 
 function toTime(value: string): number | null {
   if (!value) {
@@ -128,7 +128,7 @@ export default function Timeline({ items }: { items: WorkItem[] }) {
               return (
                 <div className="timeline-row" key={item.id}>
                   <div className="timeline-label">
-                    <Avatar name={item.assignee} />
+                    <AssigneeAvatars names={item.assignees} />
                     <span className="work-item-number">{item.external_id}</span>
                     <a
                       className="timeline-title"

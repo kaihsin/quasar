@@ -18,7 +18,7 @@ const listResponse: WorkItemsResponse = {
       title: "Investigate sync gap",
       url: "https://example.com/issues/123",
       status: "open",
-      assignee: "kai",
+      assignees: ["kai"],
       labels: [],
       priority: null,
       created_at: "2026-07-06T10:00:00Z",

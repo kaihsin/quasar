@@ -5,7 +5,7 @@ import { streamWorkItems } from "./api";
 import ActivityPanel from "./components/ActivityPanel";
 import ItemDetailModal from "./components/ItemDetailModal";
 import Filters from "./components/Filters";
-import Avatar from "./components/Avatar";
+import AssigneeAvatars from "./components/AssigneeAvatars";
 import StatusChart from "./components/StatusChart";
 import SummaryCards from "./components/SummaryCards";
 import Timeline from "./components/Timeline";
@@ -79,7 +79,7 @@ function matchesSearch(item: WorkItem, tokens: string[]): boolean {
     item.status,
     item.container,
     item.repo ?? "",
-    item.assignee ?? "",
+    ...item.assignees,
     item.author ?? "",
     ...item.labels,
   ]
@@ -180,13 +180,9 @@ export default function App() {
   const availableSources = Array.from(new Set(items.map((item) => item.source)));
   const availableStatuses = Array.from(new Set(items.map((item) => item.status)));
   const assigneeNames = Array.from(
-    new Set(
-      items
-        .map((item) => item.assignee)
-        .filter((assignee): assignee is string => assignee !== null),
-    ),
+    new Set(items.flatMap((item) => item.assignees)),
   ).sort((left, right) => left.localeCompare(right));
-  const hasUnassigned = items.some((item) => item.assignee === null);
+  const hasUnassigned = items.some((item) => item.assignees.length === 0);
   const availableAssignees = hasUnassigned ? [UNASSIGNED, ...assigneeNames] : assigneeNames;
 
   useEffect(() => {
@@ -221,8 +217,8 @@ export default function App() {
     const assigneeMatches =
       selectedAssignee === "all" ||
       (selectedAssignee === UNASSIGNED
-        ? item.assignee === null
-        : item.assignee === selectedAssignee);
+        ? item.assignees.length === 0
+        : item.assignees.includes(selectedAssignee));
     const searchMatches = searchTokens.length === 0 || matchesSearch(item, searchTokens);
     return containerMatches && sourceMatches && statusMatches && assigneeMatches && searchMatches;
   });
@@ -430,7 +426,7 @@ function WorkItemCard({ item, onOpen }: { item: WorkItem; onOpen: () => void }) 
           ↗
         </a>
         <span className="work-item-location">{location}</span>
-        <Avatar name={item.assignee} />
+        <AssigneeAvatars names={item.assignees} />
       </div>
       <div className="work-item-dates">
         <span className="date-chip">
@@ -445,7 +441,7 @@ function WorkItemCard({ item, onOpen }: { item: WorkItem; onOpen: () => void }) 
       <div className="work-item-sub">
         <span className="status-chip">{item.status}</span>
         <span className="item-meta">
-          {item.assignee ? `Assigned to ${item.assignee}` : "Unassigned"}
+          {item.assignees.length ? `Assigned to ${item.assignees.join(", ")}` : "Unassigned"}
           {item.priority ? ` • Priority ${item.priority}` : ""}
         </span>
         {item.labels.map((label) => (
