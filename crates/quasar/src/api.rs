@@ -217,6 +217,14 @@ fn fetch_work_item_detail(state: &AppState, id: &str) -> Result<WorkItemDetail, 
                     detail.project_status = fields.project_status;
                     detail.status_options = fields.status_options;
                 }
+                detail.assignee_options =
+                    adapters::github::fetch_assignable_users(state.runner.as_ref(), repo)
+                        .into_iter()
+                        .map(|login| crate::domain::AssigneeOption {
+                            id: login.clone(),
+                            name: login,
+                        })
+                        .collect();
                 Ok(detail)
             }
         };
@@ -260,6 +268,8 @@ fn fetch_work_item_detail(state: &AppState, id: &str) -> Result<WorkItemDetail, 
                     }
                     detail.project_status = Some(detail.item.status.clone());
                     detail.status_options = options;
+                    detail.assignee_options =
+                        adapters::jira::fetch_assignable_users(state.runner.as_ref(), jira, key);
                 }
                 Ok(detail)
             }
@@ -1544,6 +1554,9 @@ mod tests {
                         .to_string())
                 } else if args.join(" ").contains("issue view") {
                     Ok(r#"{"number":123,"title":"t","url":"https://github.com/o/r/issues/123","state":"OPEN","assignees":[],"labels":[],"createdAt":"2026-01-01T00:00:00Z","updatedAt":"2026-01-01T00:00:00Z","author":{"login":"a"}}"#.to_string())
+                } else if args.iter().any(|a| a.contains("assignees")) {
+                    // `gh api repos/o/r/assignees --paginate`
+                    Ok("[]".to_string())
                 } else {
                     Err(CommandRunnerError::new("unexpected"))
                 }

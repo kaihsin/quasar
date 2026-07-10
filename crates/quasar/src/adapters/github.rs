@@ -131,13 +131,78 @@ fn normalize_issue_detail(raw: &str, repo: &str) -> AdapterResult<WorkItemDetail
         .collect();
     let body = detail.body;
     let item = normalize_issue(detail.base, Some(repo));
+    // GitHub logins are the write ids for assignees.
+    let assignee_selected = item.assignees.clone();
     Ok(WorkItemDetail {
         item,
         body,
         comments,
         project_status: None,
         status_options: Vec::new(),
+        assignee_options: Vec::new(),
+        assignee_selected,
     })
+}
+
+/// Best-effort: repo assignable users (logins). Empty on any failure.
+/// `gh api --paginate` merges the paged JSON arrays into one array.
+pub fn fetch_assignable_users(runner: &dyn CommandRunner, repo: &str) -> Vec<String> {
+    let path = format!("repos/{repo}/assignees");
+    let Ok(raw) = runner.run("gh", &["api", &path, "--paginate"]) else {
+        return Vec::new();
+    };
+    #[derive(Deserialize)]
+    struct User {
+        login: String,
+    }
+    serde_json::from_str::<Vec<User>>(&raw)
+        .map(|users| users.into_iter().map(|u| u.login).collect())
+        .unwrap_or_default()
+}
+
+/// Set an issue's assignees to exactly `desired` by diffing against the
+/// current assignees and issuing one `gh issue edit` with add/remove flags.
+pub fn set_assignees(
+    runner: &dyn CommandRunner,
+    repo: &str,
+    number: &str,
+    desired: &[String],
+) -> AdapterResult<()> {
+    let raw = runner
+        .run("gh", &["issue", "view", number, "--json", "assignees", "-R", repo])
+        .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) })?;
+    #[derive(Deserialize)]
+    struct View {
+        assignees: Vec<GitHubUser>,
+    }
+    let current: Vec<String> = serde_json::from_str::<View>(&raw)?
+        .assignees
+        .into_iter()
+        .map(|u| u.login)
+        .collect();
+
+    let to_add: Vec<&String> = desired.iter().filter(|d| !current.contains(d)).collect();
+    let to_remove: Vec<&String> = current.iter().filter(|c| !desired.contains(c)).collect();
+    if to_add.is_empty() && to_remove.is_empty() {
+        return Ok(());
+    }
+
+    let mut args: Vec<String> = vec![
+        "issue".into(), "edit".into(), number.into(), "-R".into(), repo.into(),
+    ];
+    for login in to_add {
+        args.push("--add-assignee".into());
+        args.push(login.clone());
+    }
+    for login in to_remove {
+        args.push("--remove-assignee".into());
+        args.push(login.clone());
+    }
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    runner
+        .run("gh", &refs)
+        .map(|_| ())
+        .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) })
 }
 
 // Shape of the repo-scoped GraphQL query below: each open issue carries its
@@ -1805,5 +1870,75 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().to_lowercase().contains("option"));
+    }
+
+    #[test]
+    fn fetch_assignable_users_parses_logins() {
+        let runner = MockCommandRunner::success(r#"[{"login":"alice"},{"login":"bob"}]"#);
+        let users = super::fetch_assignable_users(&runner, "openai/quasar");
+        assert_eq!(users, vec!["alice".to_string(), "bob".to_string()]);
+    }
+
+    #[test]
+    fn set_assignees_adds_and_removes_diff() {
+        struct RoutingRunner {
+            edit_args: Mutex<Vec<String>>,
+        }
+        impl CommandRunner for RoutingRunner {
+            fn run(&self, _program: &str, args: &[&str]) -> CommandResult<String> {
+                if args.contains(&"view") {
+                    Ok(r#"{"assignees":[{"login":"alice"}]}"#.to_string())
+                } else if args.contains(&"edit") {
+                    self.edit_args
+                        .lock()
+                        .unwrap()
+                        .extend(args.iter().map(|a| a.to_string()));
+                    Ok(String::new())
+                } else {
+                    Err(CommandRunnerError::new("unexpected"))
+                }
+            }
+        }
+        let runner = RoutingRunner {
+            edit_args: Mutex::new(Vec::new()),
+        };
+        super::set_assignees(
+            &runner,
+            "openai/quasar",
+            "123",
+            &["alice".to_string(), "bob".to_string()],
+        )
+        .expect("ok");
+        let edit_args = runner.edit_args.lock().unwrap();
+        assert!(edit_args.iter().any(|a| a == "--add-assignee"));
+        assert!(edit_args.iter().any(|a| a == "bob"));
+        assert!(!edit_args.iter().any(|a| a == "--remove-assignee"));
+    }
+
+    #[test]
+    fn set_assignees_noops_when_equal() {
+        struct RoutingRunner {
+            calls: Mutex<Vec<String>>,
+        }
+        impl CommandRunner for RoutingRunner {
+            fn run(&self, _program: &str, args: &[&str]) -> CommandResult<String> {
+                self.calls
+                    .lock()
+                    .unwrap()
+                    .push(args.first().map(|a| a.to_string()).unwrap_or_default());
+                if args.contains(&"view") {
+                    Ok(r#"{"assignees":[{"login":"alice"}]}"#.to_string())
+                } else {
+                    Err(CommandRunnerError::new("unexpected edit call"))
+                }
+            }
+        }
+        let runner = RoutingRunner {
+            calls: Mutex::new(Vec::new()),
+        };
+        super::set_assignees(&runner, "openai/quasar", "123", &["alice".to_string()])
+            .expect("ok");
+        let calls = runner.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1, "only the view call runs");
     }
 }

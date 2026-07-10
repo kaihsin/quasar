@@ -53,6 +53,12 @@ pub struct Comment {
     pub body: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AssigneeOption {
+    pub id: String,
+    pub name: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WorkItemDetail {
     pub item: WorkItem,
@@ -62,6 +68,10 @@ pub struct WorkItemDetail {
     pub project_status: Option<String>,
     #[serde(default)]
     pub status_options: Vec<String>,
+    #[serde(default)]
+    pub assignee_options: Vec<AssigneeOption>,
+    #[serde(default)]
+    pub assignee_selected: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -178,6 +188,8 @@ mod tests {
             }],
             project_status: None,
             status_options: Vec::new(),
+            assignee_options: Vec::new(),
+            assignee_selected: Vec::new(),
         };
 
         let serialized = serde_json::to_value(detail).expect("detail should serialize");
@@ -220,6 +232,8 @@ mod tests {
                 "In Progress".to_string(),
                 "Done".to_string(),
             ],
+            assignee_options: Vec::new(),
+            assignee_selected: Vec::new(),
         };
         let serialized = serde_json::to_value(detail).expect("serialize");
         assert_eq!(serialized["project_status"], "In Progress");

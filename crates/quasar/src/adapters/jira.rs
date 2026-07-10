@@ -58,6 +58,8 @@ struct JiraStatus {
 struct JiraPerson {
     #[serde(rename = "displayName")]
     display_name: String,
+    #[serde(default, rename = "accountId")]
+    account_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -291,6 +293,15 @@ fn normalize_issue_detail(raw: &str) -> AdapterResult<WorkItemDetail> {
         })
         .collect();
 
+    // Capture the current assignee's accountId (the write id) before `assignee`
+    // is consumed below to build the display-name `assignees` list.
+    let assignee_selected: Vec<String> = fields
+        .assignee
+        .as_ref()
+        .and_then(|p| p.account_id.clone())
+        .into_iter()
+        .collect();
+
     let item = WorkItem {
         source: WorkSource::Jira,
         id: format!("jira:{external_id}"),
@@ -317,6 +328,8 @@ fn normalize_issue_detail(raw: &str) -> AdapterResult<WorkItemDetail> {
         comments,
         project_status: None,
         status_options: Vec::new(),
+        assignee_options: Vec::new(),
+        assignee_selected,
     })
 }
 
@@ -505,6 +518,53 @@ pub fn fetch_status_options(
         .into_iter()
         .map(|transition| transition.to.name)
         .collect()
+}
+
+/// Best-effort: users assignable to `key` (accountId + displayName). Empty on failure.
+pub fn fetch_assignable_users(
+    runner: &dyn CommandRunner,
+    config: &JiraConfig,
+    key: &str,
+) -> Vec<crate::domain::AssigneeOption> {
+    let url = format!(
+        "{}/rest/api/3/user/assignable/search?issueKey={}",
+        config.base_url.trim_end_matches('/'),
+        key
+    );
+    let Ok(raw) = jira_curl(runner, config, "GET", &url, None) else {
+        return Vec::new();
+    };
+    #[derive(Deserialize)]
+    struct User {
+        #[serde(rename = "accountId")]
+        account_id: String,
+        #[serde(rename = "displayName")]
+        display_name: String,
+    }
+    serde_json::from_str::<Vec<User>>(&raw)
+        .map(|users| {
+            users
+                .into_iter()
+                .map(|u| crate::domain::AssigneeOption { id: u.account_id, name: u.display_name })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Set (or clear when None) a Jira issue's single assignee via REST PUT.
+pub fn set_assignee(
+    runner: &dyn CommandRunner,
+    config: &JiraConfig,
+    key: &str,
+    account_id: Option<&str>,
+) -> AdapterResult<()> {
+    let value = match account_id {
+        Some(id) => serde_json::json!({ "accountId": id }),
+        None => serde_json::Value::Null,
+    };
+    let body = serde_json::json!({ "fields": { "assignee": value } }).to_string();
+    jira_curl(runner, config, "PUT", &issue_url(config, key), Some(&body))?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -858,5 +918,46 @@ mod tests {
         let runner = MockCommandRunner::failure("boom");
         let options = super::fetch_status_options(&runner, &test_jira_config(), "SSW-1");
         assert!(options.is_empty());
+    }
+
+    #[test]
+    fn fetch_assignable_users_parses_options() {
+        let runner = MockCommandRunner::success(r#"[{"accountId":"a1","displayName":"Alice"}]"#);
+        let options = super::fetch_assignable_users(&runner, &test_jira_config(), "SSW-1");
+        assert_eq!(options.len(), 1);
+        assert_eq!(options[0].id, "a1");
+        assert_eq!(options[0].name, "Alice");
+    }
+
+    #[test]
+    fn set_assignee_puts_accountid() {
+        let runner = MockCommandRunner::success("");
+        super::set_assignee(&runner, &test_jira_config(), "SSW-1", Some("a1"))
+            .expect("assignee write should succeed");
+
+        let calls = runner.calls.lock().expect("calls mutex");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "curl");
+        let args = &calls[0].1;
+        assert!(args.contains(&"PUT".to_string()));
+        assert!(args
+            .iter()
+            .any(|arg| arg == "https://example.atlassian.net/rest/api/3/issue/SSW-1"));
+        assert!(args
+            .iter()
+            .any(|arg| arg.contains("accountId") && arg.contains("a1")));
+    }
+
+    #[test]
+    fn set_assignee_clears_with_null() {
+        let runner = MockCommandRunner::success("");
+        super::set_assignee(&runner, &test_jira_config(), "SSW-1", None)
+            .expect("clear should succeed");
+
+        let calls = runner.calls.lock().expect("calls mutex");
+        let args = &calls[0].1;
+        assert!(args
+            .iter()
+            .any(|arg| arg.contains("\"assignee\":null")));
     }
 }
