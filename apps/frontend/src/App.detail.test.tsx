@@ -42,6 +42,8 @@ const detail: WorkItemDetail = {
   comments: [],
   project_status: null,
   status_options: [],
+  assignee_options: [],
+  assignee_selected: [],
 };
 
 // Mocks the streaming client so it delivers a whole response as one chunk.

@@ -104,3 +104,19 @@ export async function updateWorkItemField(
   }
 }
 
+export async function updateWorkItemAssignees(
+  id: string,
+  assigneeIds: string[],
+  signal?: AbortSignal,
+): Promise<void> {
+  const response = await fetch("/api/work-item-assignees", {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ id, assignee_ids: assigneeIds }),
+    signal,
+  });
+  if (!response.ok) {
+    throw new Error(`Request failed with status ${response.status}`);
+  }
+}
+

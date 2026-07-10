@@ -1036,3 +1036,14 @@ button {
 }
 .multiselect-option { display: flex; align-items: center; gap: 8px; padding: 4px 6px; white-space: nowrap; }
 .multiselect-empty { display: block; padding: 6px; color: #7a8699; }
+
+.editable-assignees {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.assignee-option {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}

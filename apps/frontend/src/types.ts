@@ -38,12 +38,19 @@ export interface Comment {
   body: string;
 }
 
+export interface AssigneeOption {
+  id: string;
+  name: string;
+}
+
 export interface WorkItemDetail {
   item: WorkItem;
   body: string | null;
   comments: Comment[];
   project_status: string | null;
   status_options: string[];
+  assignee_options: AssigneeOption[];
+  assignee_selected: string[];
 }
 
 export type WorkItemFieldKind = "start" | "target" | "status";
