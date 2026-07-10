@@ -122,9 +122,13 @@ export default function App() {
           onChunk: (data, warnings) => {
             setResponse((prev) => {
               const base = prev ?? { data: [], warnings: [], fetched_at: "", cache_status: "" };
+              // A ticket can match multiple queries and arrive in more than one
+              // chunk under the same id; drop ids we've already merged.
+              const seen = new Set(base.data.map((item) => item.id));
+              const fresh = data.filter((item) => !seen.has(item.id));
               return {
                 ...base,
-                data: [...base.data, ...data],
+                data: [...base.data, ...fresh],
                 warnings: [...base.warnings, ...warnings],
               };
             });

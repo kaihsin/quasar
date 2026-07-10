@@ -723,6 +723,9 @@ where
     }
 
     data.sort_by(|left, right| left.id.cmp(&right.id));
+    // A ticket can match multiple queries (e.g. a board project and the person
+    // query); collapse duplicates by id (sorted above, so dups are adjacent).
+    data.dedup_by(|a, b| a.id == b.id);
 
     let response = WorkItemsResponse {
         data,
@@ -1200,6 +1203,28 @@ mod tests {
             .collect();
         assert_eq!(jira_warnings.len(), 1);
         assert!(jira_warnings[0].message.contains("acli auth expired"));
+    }
+
+    #[test]
+    fn resolve_work_items_dedupes_items_with_same_id() {
+        let queries = vec![
+            "project = SSW ORDER BY updated DESC".to_string(),
+            "(assignee in (\"a@x\")) ORDER BY updated DESC".to_string(),
+        ];
+        let runner = JiraQueryMock {
+            by_jql: HashMap::from([
+                (queries[0].clone(), Ok(jira_search_payload("SSW-1", "dup"))),
+                (queries[1].clone(), Ok(jira_search_payload("SSW-1", "dup"))),
+            ]),
+        };
+        let state = jira_cli_state(runner, queries);
+        let response = fetch_work_items(&state);
+        let ssw1 = response
+            .data
+            .iter()
+            .filter(|item| item.id == "jira:SSW-1")
+            .count();
+        assert_eq!(ssw1, 1, "duplicate ids should be collapsed");
     }
 
     #[tokio::test]

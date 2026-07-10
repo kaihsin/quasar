@@ -931,4 +931,56 @@ describe("App shell", () => {
     expect(within(projectFilter).getByRole("option", { name: "SSW" })).not.toBeNull();
     expect(within(projectFilter).queryByRole("option", { name: "openai/quasar" })).toBeNull();
   });
+
+  it("renders a single card when the same id arrives in two separate items chunks", async () => {
+    // A ticket can match more than one query (e.g. a board project and the
+    // person query), so the stream may deliver the same id in distinct chunks.
+    // Build the NDJSON body inline (two `items` lines, then `done`) since the
+    // shared streamResponse helper emits only one items chunk.
+    const dup = {
+      source: "jira",
+      id: "jira:SSW-1",
+      external_id: "SSW-1",
+      title: "Dup issue",
+      url: "https://quera.atlassian.net/browse/SSW-1",
+      status: "open",
+      assignees: [],
+      labels: [],
+      priority: null,
+      created_at: "",
+      updated_at: "",
+      start_date: "",
+      target_date: "",
+      author: null,
+      container: "SSW",
+      repo: null,
+      source_metadata: null,
+    };
+    const body =
+      JSON.stringify({ type: "items", data: [dup], warnings: [] }) +
+      "\n" +
+      JSON.stringify({ type: "items", data: [dup], warnings: [] }) +
+      "\n" +
+      JSON.stringify({ type: "done", fetched_at: "2026-07-06T12:00:00Z", cache_status: "miss" }) +
+      "\n";
+    const chunks = [new TextEncoder().encode(body)];
+    let index = 0;
+    const response = {
+      ok: true,
+      body: {
+        getReader: () => ({
+          read: async () =>
+            index < chunks.length
+              ? { done: false, value: chunks[index++] }
+              : { done: true, value: undefined },
+        }),
+      },
+    };
+    global.fetch = (jest.fn().mockResolvedValue(response) as unknown) as typeof fetch;
+
+    render(<App />);
+    await screen.findByRole("button", { name: "Dup issue" });
+
+    expect(screen.getAllByRole("button", { name: "Dup issue" }).length).toBe(1);
+  });
 });
