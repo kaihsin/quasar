@@ -483,6 +483,9 @@ fn update_jira_field(
     })?;
 
     state.cache.invalidate("work-items");
+    if matches!(field, "start" | "target") {
+        state.date_cache.invalidate(&format!("jira-dates:{key}"));
+    }
     Ok(())
 }
 
@@ -2002,6 +2005,36 @@ mod tests {
         assert_eq!(
             state.cache.get("work-items", Instant::now()),
             CacheOutcome::Miss
+        );
+    }
+
+    #[test]
+    fn jira_date_write_invalidates_date_cache_entry() {
+        let runner = Arc::new(JiraWriteRunner {
+            calls: Mutex::new(Vec::new()),
+        });
+        let state = jira_write_state(runner, Some(test_jira_config()));
+        let now = Instant::now();
+        state.date_cache.insert(
+            "jira-dates:SSW-1",
+            r#"{"start":"x","target":"y"}"#.to_string(),
+            now,
+        );
+
+        fetch_work_item_field(
+            &state,
+            &UpdateFieldRequest {
+                id: "jira:SSW-1".to_string(),
+                field: "target".to_string(),
+                value: Some("2026-07-20".to_string()),
+            },
+        )
+        .expect("date write should succeed");
+
+        assert_eq!(
+            state.date_cache.get("jira-dates:SSW-1", now),
+            CacheOutcome::Miss,
+            "a date write must invalidate the cached dates for that issue"
         );
     }
 
